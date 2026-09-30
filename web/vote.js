@@ -8,9 +8,18 @@ function status(text) { $('status').textContent = text; }
 function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
 function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
 
+// crypto.randomUUID есть только в secure context (https), а в локальной сети страница открыта по http.
+function uuid4() {
+  if (crypto.randomUUID) return crypto.randomUUID();
+  var b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = b[6] & 0x0f | 0x40; b[8] = b[8] & 0x3f | 0x80;
+  var h = Array.from(b, function (x) { return x.toString(16).padStart(2, '0'); }).join('');
+  return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20);
+}
+
 // voter_id: UUID v4 в localStorage и в своей cookie. Берём тот, что уже есть.
 var cookie = document.cookie.match(/(?:^|; )voter_id=([^;]+)/);
-var voterId = lsGet('voter_id') || (cookie && cookie[1]) || crypto.randomUUID();
+var voterId = lsGet('voter_id') || (cookie && cookie[1]) || uuid4();
 lsSet('voter_id', voterId);
 // STUB: срок жизни cookie в docs не задан, взят 1 год.
 document.cookie = 'voter_id=' + voterId + '; path=/; max-age=31536000; SameSite=Lax' +

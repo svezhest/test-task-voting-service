@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -155,6 +156,17 @@ def delete_poll(poll_id: uuid.UUID):
 def list_polls():
     with db() as conn:
         return conn.execute(POLL + " order by created_at desc").fetchall()
+
+
+@app.get("/admin/public-url")
+def public_url():
+    try:
+        with urllib.request.urlopen("http://cloudflared:2000/quicktunnel", timeout=1) as r:
+            hostname = json.load(r).get("hostname")
+    except Exception:  # tunnel is off or not up yet
+        hostname = None
+    lan = os.environ.get("HOST_LAN_IP")
+    return {"tunnel": f"https://{hostname}" if hostname else None, "lan": f"http://{lan}:8090" if lan else None}
 
 
 @app.get("/admin/polls/{poll_id}")

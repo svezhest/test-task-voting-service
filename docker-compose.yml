@@ -10,6 +10,7 @@ x-app: &app
     WEB_ROOT: /srv/web
     STAGE2_WORKERS: "1"
     STAGE2_WORKER_INDEX: "0"
+    HOST_LAN_IP: ${HOST_LAN_IP:-}
   depends_on:
     postgres: {condition: service_healthy}
     topics: {condition: service_completed_successfully}
@@ -58,6 +59,11 @@ services:
       - ./web:/srv/static:ro
       - published:/srv/web:ro
     depends_on: [admin, ingest]
+
+  cloudflared:
+    image: cloudflare/cloudflared
+    command: tunnel --no-autoupdate --metrics 0.0.0.0:2000 --url http://nginx:80
+    depends_on: [nginx]
 
 volumes:
   published:
