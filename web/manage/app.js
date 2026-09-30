@@ -21,15 +21,13 @@ const phase = (p, status = p.status) => {
   const now = Date.now();
   return now < new Date(p.window_start) ? 'planned' : now <= +new Date(p.window_end) + p.grace_s * 1000 ? 'active' : 'counting';
 };
-const badge = (p, status) => { const s = phase(p, status); return `<span class="badge s-${esc(s)}">${esc(STATUS[s] || s)}</span>`; };
+const badge = (p, status) => { const s = phase(p, status); return `<span class="badge s-${s}">${STATUS[s]}</span>`; };
 
 // ---------- местное время для полей datetime-local ----------
 
 const pad = n => String(n).padStart(2, '0');
 // Date -> «2026-10-01T21:00:00» по часам компьютера
 const local = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-// «2026-10-01T21:00[:00]» из поля -> Date по часам компьютера (строку разбираем сами, не браузером)
-const fromLocal = s => { const [y, m, d, h, mi, se = 0] = s.split(/\D/).map(Number); return new Date(y, m - 1, d, h, mi, se); };
 const offset = d => { const o = -d.getTimezoneOffset(); return (o < 0 ? '-' : '+') + pad(Math.floor(Math.abs(o) / 60)) + ':' + pad(Math.abs(o) % 60); };
 // ISO 8601 со смещением компьютера: «2026-10-01T21:00:00+03:00»
 const iso = d => local(d) + offset(d);
@@ -65,29 +63,15 @@ async function api(method, path, body) {
   return data;
 }
 
-// STUB: формат тела 422 в api.md не описан. POST отдаёт `detail` как FastAPI (список {loc, type, msg}),
-// PATCH — текст ошибки pydantic одной строкой (поле, под ним описание с [type=…]). Разбираем оба
-// и по имени поля подбираем понятную фразу; если не вышло — общая фраза.
-function problems(data) {
-  const d = data && data.detail;
-  if (Array.isArray(d)) return d.map(e => ({ loc: (e.loc || []).filter(x => x !== 'body').map(String), type: e.type, msg: e.msg || '' }));
-  if (typeof d !== 'string') return [];
-  const out = [];
-  let loc = [];
-  for (const line of d.split('\n').slice(1)) {
-    if (!/^\s/.test(line)) loc = line.split('.');
-    else { out.push({ loc, type: (line.match(/\[type=(\w+)/) || [])[1], msg: line }); loc = []; }
-  }
-  return out;
-}
-
+// 422 у POST и PATCH — список `detail`, как у FastAPI: {loc, type, msg}. Фразу подбираем по полю из loc
+// (у POST loc начинается с 'body', у PATCH — нет).
+// 409 здесь не бывает: его разбирает каждая кнопка сама.
 const EMPTY_OPT = 'Заполните все варианты ответа или уберите пустые.';
 function errText(status, data) {
-  if (status === 409) return 'Опрос уже запущен.';
   if (status === 404) return 'Опрос не найден.';
   if (status !== 422) return 'Что-то пошло не так. Попробуйте ещё раз.';
-  const msgs = problems(data).map(({ loc, type, msg }) => {
-    const [field, idx] = loc;
+  const msgs = data.detail.map(({ loc, type }) => {
+    const [field, idx] = loc.filter(x => x !== 'body');
     if (field === 'question') return 'Напишите вопрос.';
     if (field === 'options') return idx != null ? EMPTY_OPT
       : type === 'too_long' ? 'Слишком много вариантов ответа.'
@@ -95,23 +79,11 @@ function errText(status, data) {
     if (field === 'grace_s') return type === 'greater_than_equal' ? 'Задержка не может быть отрицательной.' : 'Задержка — это целое число секунд.';
     if (field === 'window_start') return 'Проверьте время начала.';
     if (field === 'window_end') return 'Проверьте время конца.';
-    // ошибка на весь опрос, без поля: узнаём по тексту
-    if (field == null && /question/i.test(msg)) return 'Напишите вопрос.';
-    if (field == null && /option/i.test(msg)) return EMPTY_OPT;
-    if (field == null && /window/i.test(msg)) return 'Конец должен быть позже начала.';
+    // loc без поля — правило на весь опрос; оно одно: конец позже начала
+    if (field == null) return 'Конец должен быть позже начала.';
     return 'Проверьте, всё ли заполнено верно.';
   });
-  return [...new Set(msgs)].join('\n') || 'Проверьте, всё ли заполнено верно.';
-}
-
-// activate отвечает 409 в двух случаях: опрос уже не черновик или время прошло. Различаем, перечитав опрос.
-async function activate(id) {
-  try { await api('POST', `/polls/${id}/activate`); }
-  catch (e) {
-    if (e.status !== 409) throw e;
-    const p = await api('GET', '/polls/' + id).catch(() => null);
-    throw Object.assign(new Error(p && p.status !== 'draft' ? 'Опрос уже запущен.' : 'Не удалось запустить: время голосования уже прошло.'), { status: 409 });
-  }
+  return [...new Set(msgs)].join('\n');
 }
 
 // ---------- вход ----------
@@ -126,9 +98,11 @@ function login(msg) {
   $('#tok').focus();
   $('#lf').onsubmit = e => {
     e.preventDefault();
-    token = $('#tok').value.trim();
-    if (!token) return toast('Введите токен.');
-    localStorage.setItem(KEY, token);
+    const t = $('#tok').value.trim();
+    if (!t) return toast('Введите токен.');
+    // токен уходит в заголовок: не-ASCII (русская раскладка) fetch не отправит
+    if (!/^[\x20-\x7e]+$/.test(t)) return toast('Токен не подошёл: проверьте раскладку клавиатуры.');
+    localStorage.setItem(KEY, token = t);
     route();
   };
 }
@@ -177,7 +151,7 @@ let pick = '', query = '';   // фильтр списка: день «2026-09-30
 
 async function listView(g) {
   main.innerHTML = '<p class="muted mono">загрузка…</p>';
-  const polls = await api('GET', '/polls');
+  let polls = await api('GET', '/polls');
   if (g !== gen) return;
   main.innerHTML = `<div class="head"><h1>Опросы</h1><a class="btn" href="#/new">Новый опрос</a></div>
     ${calendar(polls)}
@@ -205,21 +179,25 @@ async function listView(g) {
   $('#q').oninput = () => { query = $('#q').value; apply(polls); };
   $('#reset').onclick = () => { pick = query = ''; $('#q').value = ''; apply(polls); };
   apply(polls);
-  tick(polls, g);
-}
-
-// Раз в секунду: статусы в строках, мигание в календаре и счётчик «идут сейчас» — по часам, без запросов.
-function tick(polls, g) {
-  if (g !== gen) return;
-  const live = {};
-  for (const p of polls) if (phase(p) === 'active') { const k = startKey(p); live[k] = live[k.slice(0, 7)] = true; }
-  main.querySelectorAll('.cal [data-d]').forEach(c => c.classList.toggle('live', !!live[c.dataset.d]));
-  main.querySelectorAll('.mon').forEach(b => b.firstChild.classList.toggle('live', !!live[b.dataset.m]));
-  const n = polls.filter(p => phase(p) === 'active').length;
-  $('#now').innerHTML = n ? ` · <span class="go">${num(n)} ${plural(n, 'идёт', 'идут', 'идут')} сейчас</span>` : '';
-  const byId = Object.fromEntries(polls.map(p => [p.id, p]));
-  main.querySelectorAll('tr[data-id]').forEach(tr => { const b = badge(byId[tr.dataset.id]); if (tr.children[1].innerHTML !== b) tr.children[1].innerHTML = b; });
-  timer = setTimeout(() => tick(polls, g), 1000);
+  // Раз в секунду: статусы в строках, мигание в календаре и счётчик «идут сейчас» — по часам.
+  // Раз в 10 с перечитываем список: так видно «Готово» и досрочное завершение. Фильтр и поиск не трогаем.
+  let sec = 0;
+  const tick = async () => {
+    if (++sec % 10 === 0) {
+      const fresh = await api('GET', '/polls').catch(() => null);
+      if (g !== gen) return;
+      if (fresh) apply(polls = fresh);
+    }
+    const act = polls.filter(p => phase(p) === 'active'), live = {};
+    for (const p of act) { const k = startKey(p); live[k] = live[k.slice(0, 7)] = true; }
+    main.querySelectorAll('.cal [data-d]').forEach(c => c.classList.toggle('live', !!live[c.dataset.d]));
+    main.querySelectorAll('.mon').forEach(b => b.firstChild.classList.toggle('live', !!live[b.dataset.m]));
+    $('#now').innerHTML = act.length ? ` · <span class="go">${num(act.length)} ${plural(act.length, 'идёт', 'идут', 'идут')} сейчас</span>` : '';
+    const byId = Object.fromEntries(polls.map(p => [p.id, p]));
+    main.querySelectorAll('tr[data-id]').forEach(tr => { const b = badge(byId[tr.dataset.id]); if (tr.children[1].innerHTML !== b) tr.children[1].innerHTML = b; });
+    timer = setTimeout(tick, 1000);
+  };
+  tick();
 }
 
 // Календарь как у GitHub: колонки — недели с понедельника, строки — дни; последние 12 месяцев до конца текущей недели.
@@ -273,7 +251,7 @@ function apply(polls) {
       // при поиске под вопросом — только подходящие варианты, иначе все
       const opts = q && p.options.some(o => has(o.label)) ? p.options.filter(o => has(o.label)) : p.options;
       return `<tr data-id="${esc(p.id)}">
-      <td><a href="#/p/${esc(p.id)}">${hl(p.question, q) || '<span class="muted">без вопроса</span>'}</a>
+      <td><a href="#/p/${esc(p.id)}">${hl(p.question, q)}</a>
         <div class="opts">${opts.map(o => hl(o.label, q)).join('<span> · </span>')}</div></td>
       <td>${badge(p)}</td>
       <td class="mono small muted">${when(p.window_start)}</td></tr>`;
@@ -351,8 +329,8 @@ function formView(p) {
       question: f.question.value.trim(),
       type: f.type.value,
       options: [...opts.querySelectorAll('input')].map(i => i.value.trim()),
-      window_start: iso(fromLocal(f.ws.value)),
-      window_end: iso(fromLocal(f.we.value)),
+      window_start: iso(new Date(f.ws.value)),
+      window_end: iso(new Date(f.we.value)),
       grace_s: Number(f.grace.value),
     };
     buttons(false);
@@ -382,9 +360,11 @@ function ask(title, text, yes, cls = '') {
     d.showModal();
   });
 }
+// Если, пока окно открыто, экран сменился (опрос завершился, ушли на другую страницу), действие не выполняем и говорим об этом.
+const sure = async (g, ...a) => await ask(...a) && (g === gen || toast('Пока было открыто окно, страница обновилась. Проверьте опрос и повторите действие.'));
 
-async function remove(p, btn) {
-  if (!await ask('Удалить опрос?', `«${p.question}» удалится насовсем${p.status === 'final' ? ' вместе с итогами' : ''}. Вернуть его будет нельзя.`, 'Удалить', 'danger')) return;
+async function remove(p, btn, g) {
+  if (!await sure(g, 'Удалить опрос?', `«${p.question}» удалится насовсем${p.status === 'final' ? ' вместе с итогами' : ''}. Вернуть его будет нельзя.`, 'Удалить', 'danger')) return;
   btn.disabled = true;
   try {
     await api('DELETE', '/polls/' + p.id);
@@ -411,9 +391,9 @@ const shareHtml = pub => `<section class="share"><div class="qr" id="qr"></div>
     <button class="ghost" id="copy">Скопировать</button>
     <p class="muted small">Покажите QR-код в эфире — зрители наведут камеру телефона и попадут на страницу голосования.</p></div></section>`;
 
-// Адрес для телефона: туннель, если есть, иначе адрес в локальной сети, иначе адрес этой страницы.
+// Адрес для телефона: туннель, если есть, иначе адрес в локальной сети, иначе зрительский вход на этом компьютере.
 function share(pub, via, id) {
-  const url = `${pub[via] || location.origin}/p/${id}`;
+  const url = `${pub[via] || 'http://localhost:8090'}/p/${id}`;
   $('#url').textContent = url;
   $('#open').href = url;
   $('#where').textContent = pub[via] ? (via === 'tunnel' ? 'Откроется с любого телефона.' : 'Телефон должен быть в той же Wi-Fi, что и этот компьютер.') : '';
@@ -424,7 +404,9 @@ function share(pub, via, id) {
   qr.addData(url);
   qr.make();
   $('#qr').innerHTML = qr.createSvgTag({ cellSize: 1, margin: 2, scalable: true, title: url });
-  $('#copy').onclick = () => navigator.clipboard.writeText(url).then(() => toast('Ссылка скопирована.', true), () => toast('Не удалось скопировать ссылку.'));
+  // по http (адрес не localhost) navigator.clipboard нет: выделяем ссылку, копирует сам админ
+  const select = () => { getSelection().selectAllChildren($('#url')); toast('Выделено — нажмите Ctrl+C / ⌘C', true); };
+  $('#copy').onclick = () => navigator.clipboard ? navigator.clipboard.writeText(url).then(() => toast('Ссылка скопирована.', true), select) : select();
 }
 
 async function pollView(id, g) {
@@ -433,35 +415,39 @@ async function pollView(id, g) {
   const draft = p.status === 'draft', final = p.status === 'final';
   main.innerHTML = `<a class="mono small muted" href="#/">← все опросы</a>
   <div class="head" style="margin-top:32px"><h1>${esc(p.question)}</h1><span id="st">${badge(p)}</span></div>
-  ${draft ? '<p class="notice">Черновик: зрители его не видят, его можно менять. После запуска изменить или удалить опрос будет нельзя.</p>'
+  ${draft ? '<p class="notice">Черновик: зрители его не видят, его можно менять. После запуска изменить или удалить опрос нельзя до завершения.</p>'
     : final ? '' : '<p class="notice" id="notice"></p><div class="actions" id="finrow"><button class="ghost" id="fin">Завершить досрочно</button></div>'}
   ${draft ? `<div class="actions"><button id="act">Запустить</button>
     <a class="btn ghost" href="#/p/${esc(p.id)}/edit">Изменить</a><button class="ghost" id="del">Удалить</button></div>` : ''}
   ${final ? '' : shareHtml(pub)}
   <section id="an">${draft ? optList(p) : '<p class="muted mono">загрузка…</p>'}</section>
   ${final ? '<div class="del-row"><button class="ghost" id="del">Удалить опрос</button></div>' : ''}
-  <p class="tech">${TYPE[p.type] || esc(p.type)} · начало ${dt(p.window_start)} · конец ${dt(p.window_end)} · задержка ${p.grace_s} с · номер ${esc(p.id)}</p>`;
+  <p class="tech">${TYPE[p.type]} · начало ${dt(p.window_start)} · конец ${dt(p.window_end)} · задержка ${p.grace_s} с · номер ${esc(p.id)}</p>`;
   if (!final) share(pub, pub.tunnel ? 'tunnel' : 'lan', p.id);
-  if ($('#fin')) {
+  const fin = $('#fin'), del = $('#del'), act = $('#act');
+  if (fin) {
     live(p, p.status);
-    $('#fin').onclick = async () => {
-      if (!await ask('Досрочное завершение', 'Голосование закончится сейчас. Зрители с отстающей трансляцией ещё успеют проголосовать в пределах задержки. Отменить нельзя. Завершить?', 'Завершить', 'danger')) return;
-      $('#fin').disabled = true;
+    fin.onclick = async () => {
+      if (!await sure(g, 'Досрочное завершение', 'Голосование закончится сейчас. Зрители с отстающей трансляцией ещё успеют проголосовать в пределах задержки. Отменить нельзя. Завершить?', 'Завершить', 'danger')) return;
+      fin.disabled = true;
       try { await api('POST', `/polls/${p.id}/finish`); toast('Голосование завершено.', true); }
       catch (e) { if (e.status === 401) return; toast(e.status === 409 ? 'Не удалось завершить: голосование уже закончилось.' : e.message); }
       route();
     };
   }
-  if ($('#del')) $('#del').onclick = () => remove(p, $('#del'));
-  if ($('#act')) $('#act').onclick = async () => {
-    if (!await ask('Запуск опроса', 'После запуска опрос нельзя изменить или удалить до завершения. Запустить?', 'Запустить')) return;
-    $('#act').disabled = true;
-    try { await activate(p.id); route(); }
+  if (del) del.onclick = () => remove(p, del, g);
+  if (act) act.onclick = async () => {
+    if (!await sure(g, 'Запуск опроса', 'После запуска опрос нельзя изменить или удалить до завершения. Запустить?', 'Запустить')) return;
+    act.disabled = true;
+    try { await api('POST', `/polls/${p.id}/activate`); }
     catch (e) {
       if (e.status === 401) return;
-      toast(e.message);
-      if (e.status === 409) route(); else $('#act').disabled = false;
+      if (e.status !== 409) { toast(e.message); act.disabled = false; return; }
+      // 409 в двух случаях: опрос уже не черновик или время прошло. Различаем, перечитав опрос.
+      const q = await api('GET', '/polls/' + p.id).catch(() => null);
+      toast(q && q.status !== 'draft' ? 'Опрос уже запущен.' : 'Не удалось запустить: время голосования уже прошло.');
     }
+    route();
   };
   // В draft голосов нет — аналитику не спрашиваем.
   if (!draft) loop(p, g);
@@ -509,7 +495,7 @@ function liveHtml(res, an, p) {
 }
 
 function finalHtml(res, an, p) {
-  const f = an.funnel, rj = f && f.rejected;
+  const f = an.funnel, rj = f.rejected;
   const bar = v => `<div class="track"><div class="fill" style="width:${v * 100}%"></div></div>`;
   // воронка: полосы вплотную, по центру, сужаются сверху вниз
   const step = (label, v) => `<div>${label}</div><div class="cone"><div class="fill" style="width:${v / f.received * 100}%"></div></div><div class="val">${num(v)}</div>`;
@@ -523,10 +509,10 @@ function finalHtml(res, an, p) {
   ${p.type === 'multi' ? '<p class="muted small note top">Зрители могли выбрать несколько вариантов, поэтому в сумме может быть больше 100%.</p>' : ''}
   <div class="bars">${res.options.map(o => `<div>
     <div class="bar-top"><span>${esc(o.label)}</span><span class="mono">${pct(o.share)}</span></div>
-    ${bar(o.share || 0)}
+    ${bar(o.share)}
     <div class="mono muted small">${num(o.counted)} засчитано из ${num(o.total)}</div></div>`).join('')}</div>
   <h2>Голоса по секундам</h2>${chart(an, p)}
-  ${f && f.received ? `<h2>Какие голоса засчитаны</h2><div class="funnel">
+  ${f.received ? `<h2>Какие голоса засчитаны</h2><div class="funnel">
     ${step('Всего голосов', f.received)}
     ${step('Разные зрители', f.unique_voters)}
     ${step('Засчитано', f.counted)}
@@ -549,31 +535,36 @@ const cdf = (t, m) => t <= 0 ? 0 : 0.5 * (1 + erf(Math.log(t / m.median_s) / (m.
 const nice = v => { const p = 10 ** Math.floor(Math.log10(v)); const f = v / p; return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * p; };
 
 function chart(an, p) {
-  const tl = an.timeline || [], m = an.model;
+  const tl = an.timeline, m = an.model;
   const W = Math.max(320, main.clientWidth - 64), H = 260, L = 64, R = 24, T = 16, B = 32;
   const win = (new Date(p.window_end) - new Date(p.window_start)) / 1000;
   const n = Math.max(tl.length, Math.ceil(win + p.grace_s), 1);
-  const total = tl.reduce((s, x) => s + x.received, 0);
-  const model = m ? Array.from({ length: n }, (_, t) => total * (cdf(t + 1, m) - cdf(t, m))) : [];
-  // без «...»: у длинного окна сотни тысяч секунд, столько аргументов Math.max не примет
-  const max = [...tl.map(x => x.received), ...model].reduce((a, v) => Math.max(a, v), 1);
-  const ys = nice(max / 4), top = Math.ceil(max / ys) * ys, xs = nice(n / Math.max(3, W / 110));
-  const bw = (W - L - R) / n;
-  const x = t => L + t * bw, y = v => T + (1 - v / top) * (H - T - B);
+  // Столбцов не больше, чем точек по ширине: в столбце k секунд. Высота — голосов за секунду (сумма в столбце / k).
+  const k = Math.ceil(n / (W - L - R)), cols = Math.ceil(n / k);
+  const bars = Array(Math.ceil(tl.length / k)).fill(0);
+  let total = 0;
+  for (const d of tl) { bars[Math.floor(d.t / k)] += d.received; total += d.received; }
+  // Ожидаемое по модели: в эфире — из пришедших голосов на прошедшую часть окна, до текущего момента; в final — на весь итог.
+  const el = an.status === 'final' ? Infinity : (Date.now() - new Date(p.window_start)) / 1000, part = cdf(el, m);
+  const model = [];
+  for (let i = 0; i < cols && (i + 1) * k <= el && part > 0; i++) model.push(total * (cdf((i + 1) * k, m) - cdf(i * k, m)) / part);
+  const max = [...bars, ...model].reduce((a, v) => Math.max(a, v / k), 1);
+  const ys = Math.max(1, nice(max / 4)), top = Math.ceil(max / ys) * ys, xs = Math.max(1, nice(n / Math.max(3, W / 110)));
+  const bw = (W - L - R) / cols;
+  const x = t => L + t / k * bw, y = v => T + (1 - v / top) * (H - T - B);
   let s = '';
   for (let v = 0; v <= top; v += ys) s += `<line class="grid" x1="${L}" x2="${W - R}" y1="${y(v)}" y2="${y(v)}"/><text x="${L - 8}" y="${y(v) + 4}" text-anchor="end">${short(v)}</text>`;
   for (let t = 0; t <= n; t += xs) s += `<text x="${x(t)}" y="${H - 10}" text-anchor="middle">${t} с</text>`;
   const gap = bw > 4 ? 1 : 0;
-  for (const d of tl) {
-    const h = y(0) - y(d.received);
-    s += `<g><rect class="bar" x="${x(d.t) + gap}" y="${y(d.received)}" width="${bw - 2 * gap}" height="${h}"/>`
-      + `<line class="top" x1="${x(d.t) + gap}" x2="${x(d.t + 1) - gap}" y1="${y(d.received)}" y2="${y(d.received)}"/>`
-      + `<rect class="hit" x="${x(d.t)}" y="${T}" width="${bw}" height="${H - T - B}"><title>${d.t}–${d.t + 1} с: ${num(d.received)} голосов${m ? ', ожидали ' + num(Math.round(model[d.t] || 0)) : ''}</title></rect></g>`;
-  }
+  bars.forEach((v, i) => {
+    const a = i * k, h = y(v / k);
+    s += `<g><rect class="bar" x="${x(a) + gap}" y="${h}" width="${bw - 2 * gap}" height="${y(0) - h}"/>`
+      + `<line class="top" x1="${x(a) + gap}" x2="${x(a + k) - gap}" y1="${h}" y2="${h}"/>`
+      + `<rect class="hit" x="${x(a)}" y="${T}" width="${bw}" height="${H - T - B}"><title>${a}–${a + k} с: ${num(v)} голосов, ожидали ${num(model[i] && Math.round(model[i]))}</title></rect></g>`;
+  });
   if (win < n) s += `<line class="end" x1="${x(win)}" x2="${x(win)}" y1="${T}" y2="${y(0)}"/><text x="${x(win) + 6}" y="${T + 10}">конец</text>`;
-  if (m) s += `<polyline class="model" points="${model.map((v, t) => `${x(t + .5).toFixed(1)},${y(v).toFixed(1)}`).join(' ')}"/>`;
-  return `<div class="legend"><span><i class="key"></i>голосов за секунду</span>
-    ${m ? '<span><i class="key line"></i>ожидали</span>' : ''}</div>
+  s += `<polyline class="model" points="${model.map((v, i) => `${x((i + .5) * k).toFixed(1)},${y(v / k).toFixed(1)}`).join(' ')}"/>`;
+  return `<div class="legend"><span><i class="key"></i>голосов за секунду</span><span><i class="key line"></i>ожидали</span></div>
     <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Голоса по секундам">${s}</svg>`;
 }
 

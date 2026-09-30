@@ -40,7 +40,9 @@ if (/[?&]debug=1/.test(location.search)) fpPromise.then(function (fp) {
 });
 
 // Экран вместо формы: крупный заголовок, выбранные варианты (если есть), пояснение.
+// Без заголовка — «Опрос не найден», и вопрос тоже прячем.
 function show(title, note, choice) {
+  if (!title) { $('q').hidden = true; title = 'Опрос не найден'; note = 'Проверьте ссылку.'; }
   $('form').hidden = true;
   status('');
   $('title').textContent = title;
@@ -63,31 +65,23 @@ fetch('/p/' + encodeURIComponent(pollId) + '/config.json')
     var saved;
     try { saved = JSON.parse(lsGet(votedKey)); } catch (e) {}
     if (saved) {
-      return show('Голос принят', 'Вы уже голосовали в этом опросе. Страницу можно закрыть.',
-        Array.isArray(saved) ? saved : null);
+      return show('Голос принят', 'Вы уже голосовали в этом опросе. Страницу можно закрыть.', saved);
     }
     $('hint').textContent = cfg.type === 'multi' ? 'Можно выбрать несколько вариантов' : 'Выберите один вариант';
-    cfg.options.slice().sort(function (a, b) { return a.idx - b.idx; }).forEach(function (o) {
+    cfg.options.forEach(function (o) {
       var label = document.createElement('label');
-      var input = document.createElement('input');
-      var text = document.createElement('span');
-      input.type = cfg.type === 'multi' ? 'checkbox' : 'radio';
-      input.name = 'opt';
-      input.value = o.idx;
-      text.textContent = o.label;
-      label.append(input, text);
+      label.append(Object.assign(document.createElement('input'),
+        { type: cfg.type === 'multi' ? 'checkbox' : 'radio', name: 'opt', value: o.idx }), o.label);
       $('opts').append(label);
     });
     $('form').hidden = false;
     $('f').disabled = false;
   })
   .catch(function (code) {
+    if (code === 404) return show();
     $('q').hidden = true;
-    if (code === 404) return show('Опрос не найден', 'Проверьте ссылку.');
     show('Не удалось загрузить опрос', 'Проверьте связь и обновите страницу.');
   });
-
-function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
 $('form').onsubmit = async function (e) {
   e.preventDefault();
@@ -113,7 +107,7 @@ $('form').onsubmit = async function (e) {
     }
     if ([0, 502, 503, 504].indexOf(code) < 0) break;
     status('Сервер занят, пробуем ещё раз…');
-    await sleep(Math.random() * Math.min(30000, 500 * Math.pow(2, n)));
+    await new Promise(function (r) { setTimeout(r, Math.random() * Math.min(30000, 500 * Math.pow(2, n))); });
   }
 
   if (code === 204) {
@@ -125,10 +119,7 @@ $('form').onsubmit = async function (e) {
     return show('Голос принят', 'Страницу можно закрыть.', labels);
   }
   if (code === 410) return show('Голосование не идёт', 'Приём голосов ещё не открыт или уже закрыт.');
-  if (code === 404) {
-    $('q').hidden = true;
-    return show('Опрос не найден', 'Проверьте ссылку.');
-  }
+  if (code === 404) return show();
   // 422 и прочие ошибки — даём выбрать и отправить снова.
   // STUB: 400 и 5xx кроме 502/503/504 в docs для клиента не описаны: без повтора, форма снова доступна.
   $('f').disabled = false;
