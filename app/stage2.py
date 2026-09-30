@@ -111,7 +111,7 @@ async def pass2(db, poll_id, parts, window_s):
 
 async def main():
     db = await psycopg.AsyncConnection.connect(os.environ["DATABASE_URL"], autocommit=True)
-    consumer = AIOKafkaConsumer(bootstrap_servers=os.environ["KAFKA_BOOTSTRAP"], enable_auto_commit=False)
+    consumer = AIOKafkaConsumer(bootstrap_servers=os.environ["KAFKA_BOOTSTRAP"], enable_auto_commit=False, fetch_max_wait_ms=20)  # we read up to a known end: do not wait for new data
     await consumer.start()
     waiting, done = {}, set()  # poll_id -> partitions read in pass 1; polls whose results this worker has written
     while True:
