@@ -42,17 +42,29 @@ draft ──activate──► active ──конец окна + допуск─
 | Ответ | Когда |
 |---|---|
 | `204` | Голос записан в Kafka. Ответ одинаковый и для первого голоса, и для повтора: дедупликация идёт позже и наружу не видна. |
-| `400` | Нет `voter_id` или неверный формат. |
-| `404` | Опрос не найден или не активен. |
-| `410` | Окно закрыто. |
-| `422` | Неверные варианты: вне списка или несколько вариантов у `single`. |
+| `400` | Тело не разбирается: не JSON, нет полей, `voter_id` не UUID. |
+| `404` | Опрос не найден или в `draft`. |
+| `410` | Опрос не в `draft`, но время вне окна (до начала, после конца + допуск, в том числе в `counting` и `final`). |
+| `422` | Неверные варианты: пусто, вне списка, повтор, несколько у `single`. |
 | `503` | Приём перегружен, клиент повторяет с задержкой. |
 
 Хэш отпечатка считает узел приёма, а не клиент: так формат и состав отпечатка под нашим контролем.
 
 ## Админка
 
-Все запросы с заголовком `Authorization: Bearer <токен>`.
+Все запросы с заголовком `Authorization: Bearer <токен>`, иначе `401`.
+
+Тело `POST /admin/polls` (время — ISO 8601):
+
+```json
+{ "question": "Какой напиток утром?", "type": "single", "options": ["Кофе", "Чай"],
+  "window_start": "2026-10-01T18:00:00Z", "window_end": "2026-10-01T18:01:00Z", "grace_s": 60 }
+```
+
+- Вариантов 2–64, `window_end > window_start`, `grace_s ≥ 0`, иначе `422`.
+- Ответ — объект опроса: те же поля плюс `id`, `status`, `created_at`, `options: [{idx, label}]`. Создание — `201`.
+- `PATCH` принимает любое подмножество тех же полей. `PATCH` и `activate` не в `draft` — `409`. `activate`, когда окно уже прошло, — `409`.
+- `GET /admin/polls` — массив объектов опроса, новые сверху. `GET /admin/polls/{id}` — один опрос.
 
 | Запрос | Что делает |
 |---|---|
@@ -60,9 +72,11 @@ draft ──activate──► active ──конец окна + допуск─
 | `PATCH /admin/polls/{id}` | Изменить опрос, только в `draft`. |
 | `POST /admin/polls/{id}/activate` | Перевести в `active`, опубликовать конфиг. |
 | `GET /admin/polls` | Список опросов. |
+| `GET /admin/polls/{id}` | Опрос. |
 | `GET /admin/polls/{id}/results` | Итоги. |
+| `GET /admin/polls/{id}/analytics` | Аналитика. |
 
-Итоги в `active` — только `received` (сколько голосов принято), без распределения по вариантам. В `final` — полный ответ:
+Итоги до `final` — только `{status, received}`, без распределения по вариантам. В `final` — полный ответ:
 
 ```json
 {
@@ -79,7 +93,31 @@ draft ──activate──► active ──конец окна + допуск─
 ```
 
 - `received` — все пришедшие голоса; `total` — после «один голос на `voter_id`»; `counted` — засчитанные после лимитов. Точные определения — в [contracts.md](contracts.md).
-- `share` считается от засчитанных.
+- `share` = `counted` варианта / `counted` в корне; у `multi` сумма долей может быть больше 1. При нуле голосов `share` и `over_limit_share` — `null`.
+
+### Аналитика
+
+Только агрегаты. `timeline` доступна и во время эфира (число голосов без распределения по вариантам), остальное — в `final`, до этого `null`.
+
+```json
+{
+  "status": "final",
+  "window_start": "2026-10-01T18:00:00+00:00",
+  "timeline": [ { "t": 0, "received": 120 }, { "t": 1, "received": 450 } ],
+  "model": { "median_s": 14, "sigma": 0.5 },
+  "funnel": { "received": 25300000, "unique_voters": 25000000, "counted": 24100000,
+              "rejected": { "repeat_voter": 300000, "key_limit": 850000, "ip_ceiling": 50000 } },
+  "ip_concentration": [ { "bucket": "1",      "ips": 18000000, "votes": 18000000 },
+                        { "bucket": "2-10",   "ips": 2000000,  "votes": 5000000 },
+                        { "bucket": "11-100", "ips": 20000,    "votes": 1500000 },
+                        { "bucket": "101+",   "ips": 1000,     "votes": 500000 } ]
+}
+```
+
+- `timeline`: число пришедших голосов по секундам от `window_start` (по времени приёма), без пропусков от 0 до последней секунды с голосами.
+- `model`: параметры логнормальной модели из [architecture.md](architecture.md), чтобы админка нарисовала её поверх `timeline`.
+- `funnel`: `unique_voters` — после этапа 1; `rejected` — сколько отсеяно на каждом шаге.
+- `ip_concentration`: сколько IP (по `ip_hmac`) дали голосов в каждом диапазоне, считая голоса после этапа 1.
 
 ## Postgres
 
@@ -92,11 +130,17 @@ results        (poll_id, partition, option_idx, counted, total, last_offset,
 stage_progress (poll_id, stage, partition, votes, end_offset, done_at,
                                                                     PK (poll_id, stage, partition))
 fp_counts      (poll_id, partition, blob bytea,                     PK (poll_id, partition))
+timeline       (poll_id, partition, second, votes,                  PK (poll_id, partition, second))
+stage2_stats   (poll_id, partition, key_limit, ip_ceiling, ip_hist jsonb, last_offset,
+                                                                    PK (poll_id, partition))
 ```
 
 - `salt` — секретная соль для `HMAC(IP)`. Обнуляется после закрытия окна.
 - `results` обновляется, только если `last_offset` больше сохранённого.
-- `fp_counts` — блоки `c(f)` для слияния между проходами этапа 2. Глобальный блок хранится с `partition = -1`.
+- `results`: строка с `option_idx = -1` хранит число голосов партиции (корневые `counted` и `total`): у `multi` сумма по вариантам не равна числу голосов.
+- `fp_counts` — блоки `c(f)` для слияния между проходами этапа 2.
+- `timeline` пишет этап 1: абсолютные значения, пересчитываются при рестарте.
+- `stage2_stats` пишет этап 2 по правилу `last_offset`: отсеянные по лимиту ключа и потолку IP, гистограмма IP по диапазонам.
 
 ## Запись в Kafka
 

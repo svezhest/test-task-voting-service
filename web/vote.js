@@ -19,6 +19,17 @@ document.cookie = 'voter_id=' + voterId + '; path=/; max-age=31536000; SameSite=
 // STUB: если подсчёт отпечатка упал, шлём пустой fp — поведение в docs не задано.
 var fpPromise = getFp().catch(function () { return {}; });
 
+// ?debug=1: показать составляющие отпечатка с короткими хэшами — чтобы сравнивать обычное окно и инкогнито.
+if (/[?&]debug=1/.test(location.search)) fpPromise.then(function (fp) {
+  function h(s) { var x = 2166136261; for (var i = 0; i < s.length; i++) x = Math.imul(x ^ s.charCodeAt(i), 16777619); return (x >>> 0).toString(16).padStart(8, '0').slice(0, 6); }
+  var pre = document.createElement('pre');
+  pre.style.cssText = 'font-size:12px;white-space:pre-wrap;word-break:break-all';
+  pre.textContent = 'all ' + h(JSON.stringify(fp)) + '\n' + Object.keys(fp).sort().map(function (k) {
+    var v = String(JSON.stringify(fp[k])); return h(v) + '  ' + k + ' = ' + v.slice(0, 80);
+  }).join('\n');
+  document.body.append(pre);
+});
+
 // STUB: окно (window_start, window_end, grace_s) на клиенте не проверяем — это решает приём (410).
 fetch('/p/' + encodeURIComponent(pollId) + '/config.json')
   .then(function (r) { if (!r.ok) throw r.status; return r.json(); })
