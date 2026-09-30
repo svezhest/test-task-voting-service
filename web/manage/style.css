@@ -116,6 +116,16 @@ mark { background: var(--mark); color: inherit; }
 .list td:first-child { width: 100%; max-width: 0; }
 .list td a { display: block; font-size: 17px; text-decoration: none; overflow-wrap: anywhere; }
 .list td + td { white-space: nowrap; }
+/* пейджер: квадраты одной ширины, текущая страница — залитая */
+#rows { scroll-margin-top: 24px; }
+.pager { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px 24px; margin-top: 32px; }
+.pager p { margin: 0; font-size: 14px; font-variant-numeric: tabular-nums; }
+.pages { display: flex; gap: 4px; }
+.pages > * { min-width: 40px; height: 40px; padding: 0 6px; display: grid; place-items: center; font: 14px/1 var(--mono); font-variant-numeric: tabular-nums; }
+.pages span { color: var(--muted); }
+.pages .on { cursor: default; }
+.pages .on:hover { background: var(--fg); border-color: var(--fg); }
+.pages .ghost:disabled:hover { color: var(--fg); border-color: var(--line); }
 .empty { padding: 56px 0; border-top: 1px solid var(--line); text-align: center; }
 .empty p { margin: 0 0 6px; }
 .tz { font-size: 12px; margin: 4px 0 0; }
@@ -218,6 +228,7 @@ svg .hit:hover { fill: var(--fg); fill-opacity: .06; }
   .cal { padding: 20px 16px 24px; }
   .cal-in { margin: 0; }
   #reset { width: 100%; }
+  .pages > * { min-width: 34px; height: 36px; padding: 0 4px; }
   .toast { left: 16px; right: 16px; bottom: 16px; }
 }
 

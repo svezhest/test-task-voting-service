@@ -147,7 +147,8 @@ const hl = (s, q) => {
   return out + esc(s.slice(i));
 };
 
-let pick = '', query = '';   // фильтр списка: день «2026-09-30» или месяц «2026-09»; текст поиска — живут, пока открыта вкладка
+let pick = '', query = '', page = 1;   // фильтр списка: день «2026-09-30» или месяц «2026-09»; текст поиска; страница — живут, пока открыта вкладка
+const PER = 20;   // опросов на странице
 
 async function listView(g) {
   main.innerHTML = '<p class="muted mono">загрузка…</p>';
@@ -174,13 +175,13 @@ async function listView(g) {
   inner.onmouseleave = () => tip.hidden = true;
   if (!polls.length) return;
   // повторный клик по тому же дню или месяцу — сброс
-  inner.onclick = e => { const k = e.target.closest('[data-d], [data-m]'); if (k) { const v = k.dataset.d || k.dataset.m; pick = pick === v ? '' : v; apply(polls); } };
+  inner.onclick = e => { const k = e.target.closest('[data-d], [data-m]'); if (k) { const v = k.dataset.d || k.dataset.m; pick = pick === v ? '' : v; page = 1; apply(polls); } };
   $('#q').value = query;
-  $('#q').oninput = () => { query = $('#q').value; apply(polls); };
-  $('#reset').onclick = () => { pick = query = ''; $('#q').value = ''; apply(polls); };
+  $('#q').oninput = () => { query = $('#q').value; page = 1; apply(polls); };
+  $('#reset').onclick = () => { pick = query = ''; page = 1; $('#q').value = ''; apply(polls); };
   apply(polls);
   // Раз в секунду: статусы в строках, мигание в календаре и счётчик «идут сейчас» — по часам.
-  // Раз в 10 с перечитываем список: так видно «Готово» и досрочное завершение. Фильтр и поиск не трогаем.
+  // Раз в 10 с перечитываем список: так видно «Готово» и досрочное завершение. Фильтр, поиск и страницу не трогаем.
   let sec = 0;
   const tick = async () => {
     if (++sec % 10 === 0) {
@@ -246,8 +247,12 @@ function apply(polls) {
   const where = (pick ? (pick.length > 7 ? 'За ' + dayName(pick) : 'За ' + monName(pick)) : '') + (q ? (pick ? ' по' : 'По') + ` запросу «${esc(query.trim())}»` : '');
   $('#sum').innerHTML = where ? `${where}: <b>${polls_(shown.length)}</b>` : `Все опросы: <b>${num(polls.length)}</b>`;
   $('#reset').hidden = !where;
+  // страница: если после обновления её не стало — последняя
+  const pages = Math.max(1, Math.ceil(shown.length / PER));
+  page = Math.min(page, pages);
+  const from = (page - 1) * PER;
   $('#rows').innerHTML = shown.length ? `<table class="list"><thead><tr><th>Вопрос</th><th>Статус</th><th>Начало</th></tr></thead><tbody>
-    ${shown.map(p => {
+    ${shown.slice(from, from + PER).map(p => {
       // при поиске под вопросом — только подходящие варианты, иначе все
       const opts = q && p.options.some(o => has(o.label)) ? p.options.filter(o => has(o.label)) : p.options;
       return `<tr data-id="${esc(p.id)}">
@@ -255,9 +260,27 @@ function apply(polls) {
         <div class="opts">${opts.map(o => hl(o.label, q)).join('<span> · </span>')}</div></td>
       <td>${badge(p)}</td>
       <td class="mono small muted">${when(p.window_start)}</td></tr>`;
-    }).join('')}</tbody></table>`
+    }).join('')}</tbody></table>${pages > 1 ? pager(pages, from, shown.length) : ''}`
     : '<div class="empty"><p>Ничего не нашлось.</p><p class="muted small">Попробуйте другое слово или сбросьте фильтры.</p></div>';
   main.querySelectorAll('tr[data-id]').forEach(tr => tr.onclick = () => location.hash = '#/p/' + tr.dataset.id);
+  // к новой странице — с её начала, если начало списка ушло за верх экрана
+  main.querySelectorAll('.pages [data-p]').forEach(b => b.onclick = () => {
+    page = +b.dataset.p; apply(polls);
+    if ($('#rows').getBoundingClientRect().top < 0) $('#rows').scrollIntoView();
+  });
+}
+
+// Пейджер: всегда семь мест под номера, чтобы стрелки не прыгали — 1 2 3 4 5 … 12, 1 … 4 5 6 … 12, 1 … 8 9 10 11 12.
+function pager(n, from, total) {
+  const nums = n <= 7 ? Array.from({ length: n }, (_, i) => i + 1)
+    : page <= 4 ? [1, 2, 3, 4, 5, 0, n]
+    : page >= n - 3 ? [1, 0, n - 4, n - 3, n - 2, n - 1, n]
+    : [1, 0, page - 1, page, page + 1, 0, n];
+  const btn = (p, text, label) => `<button class="ghost" data-p="${p}" aria-label="${label}"${p < 1 || p > n ? ' disabled' : ''}>${text}</button>`;
+  return `<div class="pager" role="navigation" aria-label="Страницы списка">
+    <div class="pages">${btn(page - 1, '←', 'Предыдущая страница')}${nums.map(i => !i ? '<span>…</span>'
+      : i === page ? `<button class="on" aria-current="page">${i}</button>` : btn(i, i, 'Страница ' + i)).join('')}${btn(page + 1, '→', 'Следующая страница')}</div>
+    <p class="mono muted">${num(from + 1)}–${num(Math.min(from + PER, total))} из ${num(total)}</p></div>`;
 }
 
 // ---------- создание и правка черновика: одна форма ----------
@@ -415,8 +438,7 @@ async function pollView(id, g) {
   const draft = p.status === 'draft', final = p.status === 'final';
   main.innerHTML = `<a class="mono small muted" href="#/">← все опросы</a>
   <div class="head" style="margin-top:32px"><h1>${esc(p.question)}</h1><span id="st">${badge(p)}</span></div>
-  ${draft ? '<p class="notice">Черновик: зрители его не видят, его можно менять. После запуска изменить или удалить опрос нельзя до завершения.</p>'
-    : final ? '' : '<p class="notice" id="notice"></p><div class="actions" id="finrow"><button class="ghost" id="fin">Завершить досрочно</button></div>'}
+  ${draft || final ? '' : '<p class="notice" id="notice"></p><div class="actions" id="finrow"><button class="ghost" id="fin">Завершить досрочно</button></div>'}
   ${draft ? `<div class="actions"><button id="act">Запустить</button>
     <a class="btn ghost" href="#/p/${esc(p.id)}/edit">Изменить</a><button class="ghost" id="del">Удалить</button></div>` : ''}
   ${final ? '' : shareHtml(pub)}
