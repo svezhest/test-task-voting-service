@@ -15,10 +15,7 @@ def analytics(client, pid):
 
 
 def bucket(a, name):
-    for b in a["ip_concentration"]:
-        if b["bucket"] == name:
-            return b["ips"], b["votes"]
-    return 0, 0
+    return next((b["ips"], b["votes"]) for b in a["ip_concentration"] if b["bucket"] == name)
 
 
 def ok(r):
@@ -54,10 +51,10 @@ def test_active_funnel_and_ip_null(active_poll):
     assert a["ip_concentration"] is None
 
 
-def test_active_model_null(active_poll):
-    # api.md: «timeline доступна и во время эфира, остальное — в final, до этого null».
+def test_active_model(active_poll):
+    # api.md: model доступна и во время эфира; параметры — из architecture.md.
     _, a = active_poll
-    assert a["model"] is None
+    assert a["model"] == {"median_s": 14, "sigma": 0.5}
 
 
 def test_active_results_received(client, active_poll):
@@ -91,9 +88,10 @@ def test_final_format(final):
     assert a["model"] == {"median_s": 14, "sigma": 0.5}  # architecture.md
     assert a["funnel"].keys() == {"received", "unique_voters", "counted", "rejected"}
     assert a["funnel"]["rejected"].keys() == {"repeat_voter", "key_limit", "ip_ceiling"}
+    assert len(a["ip_concentration"]) == 4
+    assert {b["bucket"] for b in a["ip_concentration"]} == BUCKETS
     for b in a["ip_concentration"]:
         assert b.keys() == {"bucket", "ips", "votes"}
-        assert b["bucket"] in BUCKETS
 
 
 def test_final_timeline_matches_received(final):
@@ -135,7 +133,21 @@ def test_ip_concentration(final):
     assert bucket(a, "101+") == (1, 300)
 
 
-@pytest.mark.skip(reason="вопрос: пустые диапазоны ip_concentration — присутствуют с нулями или отсутствуют? "
-                         "Каков timeline без голосов — []? Что отдаёт analytics у опроса в draft?")
-def test_empty_buckets_and_draft():
-    pass
+def test_draft_analytics(client, make_poll):
+    p = make_poll(active=False)
+    a = analytics(client, p["id"])
+    assert a["status"] == "draft"
+    assert a["timeline"] == []
+    assert a["funnel"] is None
+    assert a["ip_concentration"] is None
+
+
+def test_zero_votes_analytics(client, make_poll, wait_final):
+    p = make_poll(window_s=3)
+    wait_final(p)
+    a = analytics(client, p["id"])
+    assert a["timeline"] == []
+    assert a["funnel"] == {"received": 0, "unique_voters": 0, "counted": 0,
+                           "rejected": {"repeat_voter": 0, "key_limit": 0, "ip_ceiling": 0}}
+    assert sorted(a["ip_concentration"], key=lambda b: b["bucket"]) == [
+        {"bucket": b, "ips": 0, "votes": 0} for b in sorted(BUCKETS)]

@@ -58,8 +58,7 @@ def test_layout_of_non_uuid_fields():
     assert b[49:57] == v.fp_hash
 
 
-@pytest.mark.skip(reason="вопрос: порядок байт UUID в записи не задан (uuid.bytes или uuid.bytes_le?); "
-                         "«little-endian» в api.md относится к числам или и к UUID?")
+# api.md: UUID — 16 байт в порядке RFC 4122 (uuid.bytes).
 def test_layout_of_uuid_fields():
     v = make()
     b = encode(v)

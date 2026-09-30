@@ -86,7 +86,12 @@ def test_410_after_final(make_poll, vote, wait_final):
     assert vote(p["id"], [0]).status_code == 410
 
 
-@pytest.mark.skip(reason="вопрос: какой код на fp не-объект (строка, число) и на options не-список — 400? "
-                         "На poll_id не UUID — 400 или 404? В api.md для 400 назван только voter_id")
-def test_bad_fp_or_poll_id():
-    pass
+@pytest.mark.parametrize("field,value", [
+    ("fp", "str"), ("fp", 1), ("fp", [1]),
+    ("options", 0), ("options", "0"),
+    ("poll_id", "not-a-uuid"), ("poll_id", 123),
+])
+def test_400_bad_types(client, poll, field, value):
+    body = {"poll_id": poll["id"], "options": [0], "voter_id": str(uuid.uuid4()), "fp": {}}
+    body[field] = value
+    assert client.post("/api/vote", json=body).status_code == 400

@@ -1,5 +1,6 @@
 import datetime as dt
 import time
+import uuid
 
 import pytest
 
@@ -72,11 +73,21 @@ def test_create_422(client, kw):
 
 
 def test_activate_past_window_409(client):
+    # «Окно прошло» = now > window_end + grace_s.
     now = int(time.time())
-    b = body(window_start=iso(now - 120), window_end=iso(now - 60), grace_s=0)
+    b = body(window_start=iso(now - 120), window_end=iso(now - 60), grace_s=30)
     r = client.post("/admin/polls", json=b, headers=AUTH)
     assert r.status_code == 201, r.text
     assert client.post(f"/admin/polls/{r.json()['id']}/activate", headers=AUTH).status_code == 409
+
+
+def test_activate_in_grace_ok(client):
+    # window_end прошёл, но window_end + grace_s ещё нет — окно не прошло.
+    now = int(time.time())
+    b = body(window_start=iso(now - 120), window_end=iso(now - 10), grace_s=60)
+    pid = client.post("/admin/polls", json=b, headers=AUTH).json()["id"]
+    r = client.post(f"/admin/polls/{pid}/activate", headers=AUTH)
+    assert r.status_code < 300, r.text
 
 
 def test_patch_draft(client):
@@ -88,13 +99,25 @@ def test_patch_draft(client):
     assert got["question"] == "Вопрос?"
 
 
-@pytest.mark.skip(reason="вопрос: код ответа на несуществующий опрос в GET/PATCH/activate/results/analytics "
-                         "(/admin/polls/{неизвестный id}) — 404? В api.md не сказано")
-def test_unknown_poll_404():
-    pass
+@pytest.mark.parametrize("method,path", [
+    ("GET", "/admin/polls/{id}"),
+    ("PATCH", "/admin/polls/{id}"),
+    ("POST", "/admin/polls/{id}/activate"),
+    ("GET", "/admin/polls/{id}/results"),
+    ("GET", "/admin/polls/{id}/analytics"),
+])
+def test_unknown_poll_404(client, method, path):
+    r = client.request(method, path.format(id=uuid.uuid4()), headers=AUTH, json={"question": "?"})
+    assert r.status_code == 404
 
 
-@pytest.mark.skip(reason="вопрос: PATCH с невалидными полями (1 вариант, window_end <= window_start, grace_s < 0) — "
-                         "тоже 422? Правило 2–64/окно/допуск в api.md написано для тела POST")
-def test_patch_422():
-    pass
+@pytest.mark.parametrize("kw", [
+    {"options": ["Один"]},
+    {"options": [f"o{i}" for i in range(65)]},
+    {"window_start": iso(2_000_000_000), "window_end": iso(2_000_000_000)},
+    {"window_start": iso(2_000_000_060), "window_end": iso(2_000_000_000)},
+    {"grace_s": -1},
+], ids=["1-option", "65-options", "end-eq-start", "end-before-start", "negative-grace"])
+def test_patch_422(client, kw):
+    pid = client.post("/admin/polls", json=body(), headers=AUTH).json()["id"]
+    assert client.patch(f"/admin/polls/{pid}", json=kw, headers=AUTH).status_code == 422
