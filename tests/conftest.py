@@ -13,15 +13,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 BASE = "http://localhost:8090"
 AUTH = {"Authorization": "Bearer dev-token"}
 
-# Формат тела POST /admin/polls в docs не описан. Берём поля config.json из contracts.md
-# и ISO 8601 для времени. Если стенд их не принимает — тест пропускается с этим вопросом.
-CREATE_QUESTION = (
-    "вопрос: формат тела POST /admin/polls и ответа на него не описан в docs. "
-    "Тест шлёт поля config.json {question, type, options: [{idx, label}], window_start, "
-    "window_end (ISO 8601), grace_s} и ждёт в ответе поле id"
-)
-
-
 def iso(ts):
     return dt.datetime.fromtimestamp(ts, dt.timezone.utc).isoformat()
 
@@ -70,18 +61,14 @@ def make_poll(client, activate):
         body = {
             "question": "Тестовый вопрос?",
             "type": type,
-            "options": [{"idx": i, "label": label} for i, label in enumerate(labels)],
+            "options": list(labels),
             "window_start": iso(start),
             "window_end": iso(start + window_s),
             "grace_s": 0,
         }
         r = client.post("/admin/polls", json=body, headers=AUTH)
-        try:
-            poll_id = r.json()["id"]
-        except Exception:
-            poll_id = None
-        if r.status_code >= 300 or poll_id is None:
-            pytest.skip(f"{CREATE_QUESTION}; стенд ответил {r.status_code} {r.text[:200]}")
+        assert r.status_code == 201, r.text
+        poll_id = r.json()["id"]
         poll = {"id": poll_id, "labels": list(labels), "window_start": start, "window_end": start + window_s}
         if active:
             activate(poll_id)

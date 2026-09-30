@@ -29,11 +29,16 @@ def test_400_bad_voter_id(poll, vote, voter_id):
     assert vote(poll["id"], [0], voter_id=voter_id).status_code == 400
 
 
-@pytest.mark.skip(reason="вопрос: «неверный формат» в 400 — только формат voter_id или любой неразбираемый запрос "
-                         "(битый JSON, нет poll_id/options/fp)? FastAPI по умолчанию отвечает на это 422")
 def test_400_not_json(client):
     r = client.post("/api/vote", content=b"{oops", headers={"Content-Type": "application/json"})
     assert r.status_code == 400
+
+
+@pytest.mark.parametrize("field", ["poll_id", "options", "voter_id", "fp"])
+def test_400_missing_field(client, poll, field):
+    body = {"poll_id": poll["id"], "options": [0], "voter_id": str(uuid.uuid4()), "fp": {}}
+    del body[field]
+    assert client.post("/api/vote", json=body).status_code == 400
 
 
 def test_404_unknown_poll(client, vote):
@@ -68,11 +73,20 @@ def test_422_multi_out_of_range(make_poll, vote):
     assert vote(p["id"], [0, 2]).status_code == 422
 
 
-@pytest.mark.skip(reason="вопрос: пустой список options ([]) — это 422 «неверные варианты» или 400 «неверный формат»?")
-def test_empty_options(poll, vote):
-    assert vote(poll["id"], []).status_code == 422
+@pytest.mark.parametrize("type", ["single", "multi"])
+@pytest.mark.parametrize("options", [[], [0, 0]])
+def test_422_empty_or_duplicate(make_poll, vote, type, options):
+    p = make_poll(labels=("A", "B"), type=type)
+    assert vote(p["id"], options).status_code == 422
 
 
-@pytest.mark.skip(reason="вопрос: повтор варианта в options ([0, 0]) у single — 422 или один вариант?")
-def test_duplicate_option_single(poll, vote):
-    assert vote(poll["id"], [0, 0]).status_code == 422
+def test_410_after_final(make_poll, vote, wait_final):
+    p = make_poll(window_s=3)
+    wait_final(p)
+    assert vote(p["id"], [0]).status_code == 410
+
+
+@pytest.mark.skip(reason="вопрос: какой код на fp не-объект (строка, число) и на options не-список — 400? "
+                         "На poll_id не UUID — 400 или 404? В api.md для 400 назван только voter_id")
+def test_bad_fp_or_poll_id():
+    pass

@@ -2,10 +2,6 @@ import uuid
 
 import pytest
 
-# Во всех опросах минимум два отпечатка и ни на одном IP нет их всех:
-# случай D(IP) = len(p) — вопрос к контракту estimate_people (см. tests/unit/test_dedup.py).
-
-
 # Допуск 1e-3 у долей: в примере api.md доли округлены до 3 знаков.
 
 
@@ -60,10 +56,32 @@ def test_multi_counts_each_option(make_poll, vote, wait_final):
     assert [opt(res, i)["total"] for i in range(3)] == [1, 2, 1]
 
 
-@pytest.mark.skip(reason="вопрос: share у multi — от counted в корне (число голосов, сумма долей > 1) "
-                         "или от суммы counted по вариантам?")
-def test_multi_share():
-    pass
+def test_multi_share(make_poll, vote, wait_final):
+    # share = counted варианта / counted в корне; у multi сумма долей может быть > 1.
+    p = make_poll(labels=("A", "B"), type="multi")
+    ok(vote(p["id"], [0, 1], None, {"model": "m1"}, ip="198.51.100.1"))
+    ok(vote(p["id"], [0], None, {"model": "m2"}, ip="198.51.100.2"))
+
+    res = wait_final(p)
+    assert opt(res, 0)["share"] == pytest.approx(1.0)
+    assert opt(res, 1)["share"] == pytest.approx(0.5, abs=1e-3)
+
+
+def test_zero_votes_shares_null(make_poll, wait_final):
+    p = make_poll(window_s=3)
+    res = wait_final(p)
+    assert (res["received"], res["total"], res["counted"]) == (0, 0, 0)
+    assert res["over_limit_share"] is None
+    for o in res["options"]:
+        assert o["share"] is None
+
+
+def test_single_ip_single_fp_all_counted(make_poll, vote, wait_final):
+    # Все отпечатки опроса на одном IP: D = len(p) → n̂ = D (contracts.md), голос засчитан.
+    p = make_poll()
+    ok(vote(p["id"], [0], None, {"model": "only"}, ip="198.51.100.1"))
+    res = wait_final(p)
+    assert (res["received"], res["total"], res["counted"]) == (1, 1, 1)
 
 
 def test_results_format(make_poll, vote, wait_final):

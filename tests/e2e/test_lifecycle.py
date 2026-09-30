@@ -8,6 +8,8 @@ AUTH = {"Authorization": "Bearer dev-token"}
 @pytest.mark.parametrize("method,path", [
     ("GET", "/admin/polls"),
     ("POST", "/admin/polls"),
+    ("GET", f"/admin/polls/{uuid.uuid4()}"),
+    ("GET", f"/admin/polls/{uuid.uuid4()}/analytics"),
     ("GET", f"/admin/polls/{uuid.uuid4()}/results"),
     ("POST", f"/admin/polls/{uuid.uuid4()}/activate"),
     ("PATCH", f"/admin/polls/{uuid.uuid4()}"),
@@ -43,17 +45,17 @@ def test_lifecycle_draft_active_final(client, make_poll, activate, vote, wait_fi
     assert client.get(f"/p/{pid}").status_code == 200
 
     r = client.patch(f"/admin/polls/{pid}", json={"question": "Ещё раз?"}, headers=AUTH)
-    assert 400 <= r.status_code < 500
+    assert r.status_code == 409
+    assert client.post(f"/admin/polls/{pid}/activate", headers=AUTH).status_code == 409
 
     assert vote(pid, [0]).status_code == 204
-    # Второй отпечаток на другом IP: обходим вопрос про D(IP) = len(p) (см. tests/unit/test_dedup.py).
     assert vote(pid, [1], fp={"model": "other"}, ip="203.0.113.2").status_code == 204
 
-    # В active итоги — только received, без распределения по вариантам.
+    # До final итоги — только {status, received}.
     r = client.get(f"/admin/polls/{pid}/results", headers=AUTH)
     assert r.status_code == 200
-    assert "received" in r.json()
-    assert not r.json().get("options")
+    assert r.json().keys() == {"status", "received"}
+    assert r.json()["status"] == "active"
 
     res = wait_final(poll)
     assert res["status"] == "final"
@@ -61,4 +63,5 @@ def test_lifecycle_draft_active_final(client, make_poll, activate, vote, wait_fi
     assert res["counted"] == 2
 
     r = client.patch(f"/admin/polls/{pid}", json={"question": "После итога?"}, headers=AUTH)
-    assert 400 <= r.status_code < 500
+    assert r.status_code == 409
+    assert client.post(f"/admin/polls/{pid}/activate", headers=AUTH).status_code == 409

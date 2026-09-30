@@ -1,7 +1,7 @@
 import json
 import os
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -9,7 +9,7 @@ import psycopg
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.encoders import jsonable_encoder
 from psycopg.rows import dict_row
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field, ValidationError, model_validator
 
 
 def check_token(authorization: str = Header("")):
@@ -20,29 +20,20 @@ def check_token(authorization: str = Header("")):
 app = FastAPI(dependencies=[Depends(check_token)])
 
 
-class Option(BaseModel):
-    label: str
-
-
-# STUB: question — the request body format is not in docs. Field names follow config.json;
-# options are accepted as ["Да", "Нет"] or [{"label": "Да"}, ...], idx = position in the list.
-# STUB: question — no checks beyond types (e.g. window_end > window_start) because docs define none.
 class PollIn(BaseModel):
     question: str
     type: Literal["single", "multi"]
-    options: list[str | Option] = Field(min_length=1, max_length=64)
-    window_start: datetime
-    window_end: datetime
+    options: list[str] = Field(min_length=2, max_length=64)
+    # STUB: question — docs say only "ISO 8601"; a time without a timezone is rejected with 422.
+    window_start: AwareDatetime
+    window_end: AwareDatetime
     grace_s: int = Field(ge=0)
 
-
-class PollPatch(BaseModel):
-    question: str | None = None
-    type: Literal["single", "multi"] | None = None
-    options: list[str | Option] | None = Field(None, min_length=1, max_length=64)
-    window_start: datetime | None = None
-    window_end: datetime | None = None
-    grace_s: int | None = Field(None, ge=0)
+    @model_validator(mode="after")
+    def window(self):
+        if self.window_end <= self.window_start:
+            raise ValueError("window_end must be after window_start")
+        return self
 
 
 POLL = """
@@ -63,15 +54,28 @@ def get_poll(conn, poll_id):
     return poll
 
 
+def get_received(conn, poll_id):
+    return conn.execute(
+        "select coalesce(sum(votes), 0)::bigint as n from stage_progress where poll_id = %s and stage = 1", (poll_id,)
+    ).fetchone()["n"]
+
+
+def get_votes(conn, poll_id):  # root counted and total: rows with option_idx = -1
+    return conn.execute(
+        """select coalesce(sum(counted), 0)::bigint as counted, coalesce(sum(total), 0)::bigint as total
+             from results where poll_id = %s and option_idx = -1""",
+        (poll_id,),
+    ).fetchone()
+
+
 def set_options(conn, poll_id, options):
     conn.execute("delete from options where poll_id = %s", (poll_id,))
     conn.cursor().executemany(
         "insert into options (poll_id, idx, label) values (%s, %s, %s)",
-        [(poll_id, idx, o if isinstance(o, str) else o.label) for idx, o in enumerate(options)],
+        [(poll_id, idx, label) for idx, label in enumerate(options)],
     )
 
 
-# STUB: question — response codes/bodies for create (201 + poll), wrong status (409) and bad token (401) are not in docs.
 @app.post("/admin/polls", status_code=201)
 def create_poll(poll: PollIn):
     poll_id = uuid.uuid4()
@@ -85,25 +89,30 @@ def create_poll(poll: PollIn):
 
 
 @app.patch("/admin/polls/{poll_id}")
-def update_poll(poll_id: uuid.UUID, patch: PollPatch):
-    fields = patch.model_dump(exclude_unset=True, exclude={"options"})
+def update_poll(poll_id: uuid.UUID, patch: dict):
     with db() as conn:
-        if get_poll(conn, poll_id)["status"] != "draft":
+        poll = get_poll(conn, poll_id)
+        if poll["status"] != "draft":
             raise HTTPException(409)
-        if fields:
-            sets = ", ".join(f"{name} = %s" for name in fields)
-            conn.execute(f"update polls set {sets} where id = %s", (*fields.values(), poll_id))
-        if patch.options is not None:
-            set_options(conn, poll_id, patch.options)
+        poll["options"] = [o["label"] for o in poll["options"]]
+        try:
+            new = PollIn(**(poll | patch))
+        except ValidationError as e:
+            raise HTTPException(422, str(e))
+        conn.execute(
+            "update polls set question = %s, type = %s, window_start = %s, window_end = %s, grace_s = %s where id = %s",
+            (new.question, new.type, new.window_start, new.window_end, new.grace_s, poll_id),
+        )
+        set_options(conn, poll_id, new.options)
         return get_poll(conn, poll_id)
 
 
-# STUB: config_version is never bumped — per contracts, ingest re-reads all active polls every second.
+# STUB: config_version is never bumped — per contracts, ingest re-reads all non-draft polls every second.
 @app.post("/admin/polls/{poll_id}/activate")
 def activate_poll(poll_id: uuid.UUID):
     with db() as conn:
         poll = get_poll(conn, poll_id)
-        if poll["status"] != "draft":
+        if poll["status"] != "draft" or datetime.now(timezone.utc) > poll["window_end"] + timedelta(seconds=poll["grace_s"]):
             raise HTTPException(409)
         conn.execute("update polls set status = 'active', salt = %s where id = %s", (os.urandom(32), poll_id))
         config = {k: poll[k] for k in ("id", "question", "type", "options", "window_start", "window_end", "grace_s")}
@@ -113,28 +122,26 @@ def activate_poll(poll_id: uuid.UUID):
         return poll | {"status": "active"}
 
 
-# STUB: question — list format is not in docs; a plain JSON array of polls.
 @app.get("/admin/polls")
 def list_polls():
     with db() as conn:
-        return conn.execute(POLL + " order by created_at").fetchall()
+        return conn.execute(POLL + " order by created_at desc").fetchall()
+
+
+@app.get("/admin/polls/{poll_id}")
+def read_poll(poll_id: uuid.UUID):
+    with db() as conn:
+        return get_poll(conn, poll_id)
 
 
 @app.get("/admin/polls/{poll_id}/results")
 def poll_results(poll_id: uuid.UUID):
     with db() as conn:
         status = get_poll(conn, poll_id)["status"]
-        received = conn.execute(
-            "select coalesce(sum(votes), 0)::bigint as n from stage_progress where poll_id = %s and stage = 1", (poll_id,)
-        ).fetchone()["n"]
-        # STUB: question — docs define the non-final answer only for active; draft and counting get the same shape.
+        received = get_received(conn, poll_id)
         if status != "final":
             return {"status": status, "received": received}
-        votes = conn.execute(
-            """select coalesce(sum(counted), 0)::bigint as counted, coalesce(sum(total), 0)::bigint as total
-                 from results where poll_id = %s and option_idx = -1""",
-            (poll_id,),
-        ).fetchone()
+        votes = get_votes(conn, poll_id)
         options = conn.execute(
             """select o.idx, o.label, coalesce(sum(r.counted), 0)::bigint as counted, coalesce(sum(r.total), 0)::bigint as total
                  from options o left join results r on r.poll_id = o.poll_id and r.option_idx = o.idx
@@ -142,7 +149,6 @@ def poll_results(poll_id: uuid.UUID):
             (poll_id,),
         ).fetchall()
     counted, total = votes["counted"], votes["total"]
-    # STUB: question — share and over_limit_share are undefined with zero votes; we return null.
     for o in options:
         o["share"] = o["counted"] / counted if counted else None
     return {
@@ -153,3 +159,43 @@ def poll_results(poll_id: uuid.UUID):
         "over_limit_share": 1 - counted / total if total else None,
         "options": options,
     }
+
+
+BUCKETS = ["1", "2-10", "11-100", "101+"]
+
+
+@app.get("/admin/polls/{poll_id}/analytics")
+def poll_analytics(poll_id: uuid.UUID):
+    with db() as conn:
+        poll = get_poll(conn, poll_id)
+        seconds = {r["second"]: r["votes"] for r in conn.execute(
+            "select second, sum(votes)::bigint as votes from timeline where poll_id = %s group by second", (poll_id,)
+        )}
+        answer = {
+            "status": poll["status"],
+            "window_start": poll["window_start"],
+            "timeline": [{"t": t, "received": seconds.get(t, 0)} for t in range(max(seconds, default=-1) + 1)],
+            "model": {"median_s": 14, "sigma": 0.5},  # architecture.md: fixed model, not fitted to the poll
+            "funnel": None,
+            "ip_concentration": None,
+        }
+        if poll["status"] != "final":
+            return answer
+        received = get_received(conn, poll_id)
+        votes = get_votes(conn, poll_id)
+        stats = conn.execute("select key_limit, ip_ceiling, ip_hist from stage2_stats where poll_id = %s", (poll_id,)).fetchall()
+    answer["funnel"] = {
+        "received": received,
+        "unique_voters": votes["total"],
+        "counted": votes["counted"],
+        "rejected": {
+            "repeat_voter": received - votes["total"],
+            "key_limit": sum(s["key_limit"] for s in stats),
+            "ip_ceiling": sum(s["ip_ceiling"] for s in stats),
+        },
+    }
+    answer["ip_concentration"] = [
+        {"bucket": b, "ips": sum(s["ip_hist"][b]["ips"] for s in stats), "votes": sum(s["ip_hist"][b]["votes"] for s in stats)}
+        for b in BUCKETS
+    ]
+    return answer

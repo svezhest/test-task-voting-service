@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Админка опросов</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <a class="brand" href="#/">голосование<span class="muted"> / админка</span></a>
+  <nav>
+    <a href="#/">опросы</a>
+    <a href="#/new">новый опрос</a>
+    <button id="out" class="link">выйти</button>
+  </nav>
+</header>
+<main id="main"></main>
+<div id="toast" class="toast" role="alert" hidden></div>
+<script src="/vendor/qrcode.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

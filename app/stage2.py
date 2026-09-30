@@ -1,11 +1,11 @@
 import asyncio
-import math
 import os
 from collections import Counter, defaultdict
 
 import numpy
 import psycopg
 from aiokafka import AIOKafkaConsumer, TopicPartition
+from psycopg.types.json import Jsonb
 
 from app.dedup import estimate_people, ip_ceiling, key_limit, poisson_limit, repeat_budget
 from app.record import decode
@@ -19,6 +19,12 @@ insert into results (poll_id, partition, option_idx, counted, total, last_offset
 on conflict (poll_id, partition, option_idx) do update
    set counted = excluded.counted, total = excluded.total, last_offset = excluded.last_offset
  where excluded.last_offset > results.last_offset"""
+STATS = """
+insert into stage2_stats (poll_id, partition, key_limit, ip_ceiling, ip_hist, last_offset) values (%s, %s, %s, %s, %s, %s)
+on conflict (poll_id, partition) do update
+   set key_limit = excluded.key_limit, ip_ceiling = excluded.ip_ceiling, ip_hist = excluded.ip_hist, last_offset = excluded.last_offset
+ where excluded.last_offset > stage2_stats.last_offset"""
+BUCKETS = ["1", "2-10", "11-100", "101+"]
 
 
 def pack_counts(counts):  # c(f) block: 8-byte fp_hash + 8-byte count, repeated
@@ -57,18 +63,13 @@ async def count_poll(db, consumer, poll_id, start_ms, window_s):
             "insert into fp_counts values (%s, %s, %s) on conflict (poll_id, partition) do update set blob = excluded.blob",
             (poll_id, p, pack_counts(Counter(v.fp_hash for v in votes))),
         )
-    while (await (await db.execute(
-        "select count(*) from fp_counts where poll_id = %s and partition >= 0", (poll_id,)
-    )).fetchone())[0] < PARTITIONS:
+    while (await (await db.execute("select count(*) from fp_counts where poll_id = %s", (poll_id,))).fetchone())[0] < PARTITIONS:
         await asyncio.sleep(1)
 
     # merge
     c = Counter()
-    for (blob,) in await (await db.execute(
-        "select blob from fp_counts where poll_id = %s and partition >= 0", (poll_id,)
-    )).fetchall():
+    for (blob,) in await (await db.execute("select blob from fp_counts where poll_id = %s", (poll_id,))).fetchall():
         c.update(unpack_counts(blob))
-    await db.execute("insert into fp_counts values (%s, -1, %s) on conflict do nothing", (poll_id, pack_counts(c)))
     share = {f: n / c.total() for f, n in c.items()}
     p_all = numpy.array(list(share.values()))
     r, ceiling = repeat_budget(window_s), ip_ceiling(window_s)
@@ -80,29 +81,30 @@ async def count_poll(db, consumer, poll_id, start_ms, window_s):
         for v in votes:
             fps[v.ip_hmac].add(v.fp_hash)
             voters[v.ip_hmac, v.fp_hash] += 1
-        people = {}
-        for ip, f in fps.items():
-            try:
-                people[ip] = estimate_people(len(f), p_all)
-            except ValueError:
-                # STUB: question — D(IP) = number of all fingerprints of the poll (e.g. one IP with 2 of 2
-                # fingerprints): the equation has no root and docs don't say what to do. Here n̂ = ∞, no key limit.
-                people[ip] = math.inf
-        limits = {
-            key: n if math.isinf(people[key[0]]) else key_limit(poisson_limit(people[key[0]] * share[key[1]]), n, r)
-            for key, n in voters.items()
-        }
+        people = {ip: estimate_people(len(f), p_all) for ip, f in fps.items()}
+        limits = {key: key_limit(poisson_limit(people[key[0]] * share[key[1]]), n, r) for key, n in voters.items()}
         on_key, on_ip = Counter(), Counter()
+        rejected_key = rejected_ip = 0
         counted, total = Counter({-1: 0}), Counter({-1: 0})  # option_idx -1 = number of votes
         for v in votes:
             key = (v.ip_hmac, v.fp_hash)
-            ok = on_key[key] < limits[key] and on_ip[v.ip_hmac] < ceiling
+            key_ok = on_key[key] < limits[key]
+            ok = key_ok and on_ip[v.ip_hmac] < ceiling
+            # STUB: question — a vote over both limits is counted as rejected by the key limit (checked first, as in the funnel order).
+            rejected_key += not key_ok
+            rejected_ip += key_ok and not ok
             on_key[key] += ok
             on_ip[v.ip_hmac] += ok
             # STUB: votes over the limit are not stored anywhere with a mark, only counted in total.
             for idx in [-1] + [i for i in range(64) if v.options >> i & 1]:
                 total[idx] += 1
                 counted[idx] += ok
+        hist = {b: {"ips": 0, "votes": 0} for b in BUCKETS}
+        for n in Counter(v.ip_hmac for v in votes).values():
+            b = "1" if n == 1 else "2-10" if n <= 10 else "11-100" if n <= 100 else "101+"
+            hist[b]["ips"] += 1
+            hist[b]["votes"] += n
+        await db.execute(STATS, (poll_id, p, rejected_key, rejected_ip, Jsonb(hist), end))
         for idx in total:
             await db.execute(RESULT, (poll_id, p, idx, counted[idx], total[idx], end))
 

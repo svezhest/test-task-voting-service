@@ -16,8 +16,8 @@ def estimate_people(d: int, p: numpy.ndarray) -> float:
         return 0.0
     if d == 1:
         return 1.0
-    if d >= len(p):
-        raise ValueError(f"d={d} must be less than the number of fingerprints ({len(p)})")
+    if d >= len(p):  # all fingerprints of the poll are on this IP: no root
+        return float(d)
     log_q = numpy.log1p(-numpy.asarray(p, dtype=float))
 
     def f(n):

@@ -55,9 +55,12 @@ def test_estimate_people_increasing_in_d(p):
 
 @pytest.mark.parametrize("extra", [0, 1, 10])
 def test_estimate_people_d_too_large(extra):
+    # contracts.md: d >= len(p) — корня нет, возвращает float(d).
     p = uniform(50)
-    with pytest.raises(ValueError):
-        estimate_people(len(p) + extra, p)
+    d = len(p) + extra
+    r = estimate_people(d, p)
+    assert isinstance(r, float)
+    assert r == d
 
 
 @pytest.mark.parametrize("d", [2, 10, 100, 500, 900, 990])
@@ -69,8 +72,6 @@ def test_estimate_people_uniform_matches_analytic(d):
     assert estimate_people(d, uniform(m)) == pytest.approx(expected, rel=0.1)
 
 
-@pytest.mark.skip(reason="вопрос: единственный отпечаток в опросе (len(p) = 1) и D = 1 — по контракту "
-                         "«d = 1 → 1», но и «d должно быть меньше len(p), иначе ValueError». Что верно?")
 def test_estimate_people_single_fingerprint():
     assert estimate_people(1, np.array([1.0])) == pytest.approx(1)
 

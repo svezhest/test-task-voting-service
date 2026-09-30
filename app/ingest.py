@@ -19,11 +19,11 @@ from app.record import Vote, encode
 TRUST_XFF = os.environ["TRUST_XFF"] == "1"
 DELIVERY_TIMEOUT_S = float(os.environ["DELIVERY_TIMEOUT_S"])
 
-polls = {}  # poll_id -> (type, salt, window_start, window_end + grace_s, option idxs); times in unix seconds
+polls = {}  # non-draft poll_id -> (type, salt, window_start, window_end + grace_s, option idxs); times in unix seconds; salt only while active
 producer: AIOKafkaProducer
 
 
-# STUB: re-reads all active polls every second (as in contracts), not only changes since config_version.
+# STUB: re-reads all non-draft polls every second (as in contracts), not only changes since config_version (architecture.md).
 async def refresh_polls():
     global polls
     while True:
@@ -33,7 +33,7 @@ async def refresh_polls():
                     """select p.id, p.type, p.salt, extract(epoch from p.window_start)::float8,
                               extract(epoch from p.window_end)::float8 + p.grace_s, array_agg(o.idx)
                          from polls p join options o on o.poll_id = p.id
-                        where p.status = 'active' group by p.id"""
+                        where p.status <> 'draft' group by p.id"""
                 )
                 polls = {row[0]: row[1:] for row in await cur.fetchall()}
         except psycopg.Error as e:  # Postgres is down: keep working on the last polls
@@ -63,7 +63,7 @@ async def bad_request(request, exc):
 
 
 class VoteIn(BaseModel):
-    poll_id: uuid.UUID
+    poll_id: uuid.UUID  # STUB: question — poll_id that is not a UUID gets 400 (body does not parse), not 404; docs name only voter_id
     options: list[int]
     voter_id: uuid.UUID
     fp: dict
@@ -81,10 +81,10 @@ async def vote(body: VoteIn, request: Request):
         return Response(status_code=404)
     poll_type, salt, start, end, idxs = poll
     now = time.time()
-    if not start <= now <= end:
+    if salt is None or not start <= now <= end:
         return Response(status_code=410)
     chosen = set(body.options)
-    if not chosen or not chosen <= set(idxs) or (poll_type == "single" and len(chosen) > 1):
+    if not chosen or len(chosen) < len(body.options) or not chosen <= set(idxs) or (poll_type == "single" and len(chosen) > 1):
         return Response(status_code=422)
     record = encode(Vote(
         poll_id=body.poll_id,

@@ -28,8 +28,8 @@ services:
 
   topics:
     image: redpandadata/redpanda:v24.3.6
-    entrypoint: rpk
-    command: topic create votes_raw votes_by_ip -p 8 -X brokers=redpanda:9092
+    entrypoint: sh -c  # topics may already exist on a repeated `make up`
+    command: ["rpk topic create votes_raw votes_by_ip -p 8 -X brokers=redpanda:9092 || rpk topic describe votes_raw votes_by_ip -X brokers=redpanda:9092"]
     depends_on: {redpanda: {condition: service_healthy}}
 
   admin:

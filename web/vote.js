@@ -1,7 +1,7 @@
 // Страница опроса: /p/{poll_id}. Конфиг — /p/{poll_id}/config.json, голос — POST /api/vote.
 
 var pollId = decodeURIComponent(location.pathname.split('/')[2] || '');
-var votedKey = 'voted:' + pollId;
+var votedKey = 'voted:' + pollId; // JSON-массив выбранных вариантов
 
 function $(id) { return document.getElementById(id); }
 function status(text) { $('status').textContent = text; }
@@ -23,12 +23,27 @@ var fpPromise = getFp().catch(function () { return {}; });
 if (/[?&]debug=1/.test(location.search)) fpPromise.then(function (fp) {
   function h(s) { var x = 2166136261; for (var i = 0; i < s.length; i++) x = Math.imul(x ^ s.charCodeAt(i), 16777619); return (x >>> 0).toString(16).padStart(8, '0').slice(0, 6); }
   var pre = document.createElement('pre');
-  pre.style.cssText = 'font-size:12px;white-space:pre-wrap;word-break:break-all';
+  pre.className = 'debug';
   pre.textContent = 'all ' + h(JSON.stringify(fp)) + '\n' + Object.keys(fp).sort().map(function (k) {
     var v = String(JSON.stringify(fp[k])); return h(v) + '  ' + k + ' = ' + v.slice(0, 80);
   }).join('\n');
-  document.body.append(pre);
+  document.querySelector('main').append(pre);
 });
+
+// Экран вместо формы: крупный заголовок, выбранные варианты (если есть), пояснение.
+function show(title, note, choice) {
+  $('form').hidden = true;
+  status('');
+  $('title').textContent = title;
+  $('note').textContent = note;
+  $('chosen').hidden = !choice;
+  (choice || []).forEach(function (c) {
+    var li = document.createElement('li');
+    li.textContent = c;
+    $('choice').append(li);
+  });
+  $('msg').hidden = false;
+}
 
 // STUB: окно (window_start, window_end, grace_s) на клиенте не проверяем — это решает приём (410).
 fetch('/p/' + encodeURIComponent(pollId) + '/config.json')
@@ -36,31 +51,47 @@ fetch('/p/' + encodeURIComponent(pollId) + '/config.json')
   .then(function (cfg) {
     $('q').textContent = cfg.question;
     document.title = cfg.question;
+    var saved;
+    try { saved = JSON.parse(lsGet(votedKey)); } catch (e) {}
+    if (saved) {
+      return show('Голос принят', 'Вы уже голосовали в этом опросе. Страницу можно закрыть.',
+        Array.isArray(saved) ? saved : null);
+    }
+    $('hint').textContent = cfg.type === 'multi' ? 'Можно выбрать несколько вариантов' : 'Выберите один вариант';
     cfg.options.slice().sort(function (a, b) { return a.idx - b.idx; }).forEach(function (o) {
       var label = document.createElement('label');
       var input = document.createElement('input');
+      var text = document.createElement('span');
       input.type = cfg.type === 'multi' ? 'checkbox' : 'radio';
       input.name = 'opt';
       input.value = o.idx;
-      label.append(input, o.label);
+      text.textContent = o.label;
+      label.append(input, text);
       $('opts').append(label);
     });
-    if (lsGet(votedKey)) return status('Вы уже проголосовали.');
+    $('form').hidden = false;
     $('f').disabled = false;
   })
-  .catch(function () { $('q').textContent = 'Опрос не найден'; });
+  .catch(function (code) {
+    $('q').hidden = true;
+    if (code === 404) return show('Опрос не найден', 'Проверьте ссылку.');
+    show('Не удалось загрузить опрос', 'Проверьте связь и обновите страницу.');
+  });
 
 function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
 $('form').onsubmit = async function (e) {
   e.preventDefault();
-  var options = Array.from(document.querySelectorAll('input[name=opt]:checked'), function (i) { return +i.value; });
-  if (!options.length) return status('Выберите вариант.');
+  var checked = Array.from(document.querySelectorAll('input[name=opt]:checked'));
+  if (!checked.length) return status('Выберите вариант.');
+  var options = checked.map(function (i) { return +i.value; });
+  var labels = checked.map(function (i) { return i.parentNode.textContent; });
   $('f').disabled = true;
   status('Отправляем…');
   var body = JSON.stringify({ poll_id: pollId, options: options, voter_id: voterId, fp: await fpPromise });
 
-  // 503 и сетевая ошибка: повтор с экспоненциальной задержкой и полным разбросом, пока вкладка открыта.
+  // Сетевая ошибка, 503 (приём перегружен), 502 и 504 (упал узел приёма): повтор с тем же телом и voter_id,
+  // экспоненциальная задержка с полным разбросом, пока вкладка открыта.
   // STUB: база 0.5 с и потолок 30 с в docs не заданы.
   var code;
   for (var n = 0; ; n++) {
@@ -71,20 +102,26 @@ $('form').onsubmit = async function (e) {
     } catch (err) {
       code = 0;
     }
-    if (code !== 503 && code !== 0) break;
+    if ([0, 502, 503, 504].indexOf(code) < 0) break;
     status('Сервер занят, пробуем ещё раз…');
     await sleep(Math.random() * Math.min(30000, 500 * Math.pow(2, n)));
   }
 
   if (code === 204) {
-    lsSet(votedKey, '1');
-    return status('Голос принят. Спасибо!');
+    lsSet(votedKey, JSON.stringify(labels));
+    // Небольшой залп цветами темы; при prefers-reduced-motion библиотека ничего не рисует.
+    var css = getComputedStyle(document.documentElement);
+    if (window.confetti) confetti({ particleCount: 40, spread: 60, origin: { y: 0.7 }, disableForReducedMotion: true,
+      colors: ['--accent', '--fg', '--muted'].map(function (v) { return css.getPropertyValue(v).trim(); }) });
+    return show('Голос принят', 'Страницу можно закрыть.', labels);
   }
-  if (code === 410) return status('Голосование сейчас не идёт: окно закрыто.');
-  if (code === 404) return status('Опрос не найден или не активен.');
+  if (code === 410) return show('Голосование не идёт', 'Приём голосов ещё не открыт или уже закрыт.');
+  if (code === 404) {
+    $('q').hidden = true;
+    return show('Опрос не найден', 'Проверьте ссылку.');
+  }
   // 422 и прочие ошибки — даём выбрать и отправить снова.
-  // STUB: 400, 5xx кроме 503 (например, 502 от nginx при упавшем приёме) в docs для клиента не описаны: без повтора.
+  // STUB: 400 и 5xx кроме 502/503/504 в docs для клиента не описаны: без повтора, форма снова доступна.
   $('f').disabled = false;
-  if (code === 422) return status('Неверный выбор варианта. Выберите заново.');
-  status('Ошибка ' + code + '. Попробуйте ещё раз.');
+  status(code === 422 ? 'Этот выбор не принят. Выберите заново.' : 'Не получилось отправить. Попробуйте ещё раз.');
 };

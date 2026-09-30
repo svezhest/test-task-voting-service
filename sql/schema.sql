@@ -39,10 +39,28 @@ create table stage_progress (
     primary key (poll_id, stage, partition)
 );
 
--- partition = -1: merged global block
 create table fp_counts (
     poll_id   uuid not null,
     partition integer not null,
     blob      bytea not null,
+    primary key (poll_id, partition)
+);
+
+create table timeline (
+    poll_id   uuid not null,
+    partition integer not null,
+    second    integer not null,
+    votes     bigint not null,
+    primary key (poll_id, partition, second)
+);
+
+-- key_limit, ip_ceiling: votes rejected by each; ip_hist: {"1": {"ips": .., "votes": ..}, "2-10": ..., ...}
+create table stage2_stats (
+    poll_id     uuid not null,
+    partition   integer not null,
+    key_limit   bigint not null,
+    ip_ceiling  bigint not null,
+    ip_hist     jsonb not null,
+    last_offset bigint not null,
     primary key (poll_id, partition)
 );
