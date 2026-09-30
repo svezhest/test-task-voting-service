@@ -133,7 +133,7 @@ draft ──activate──► active ──конец окна + допуск─
 
 ```
 polls          (id uuid PK, question, type, status, window_start, window_end, grace_s,
-                salt bytea NULL, config_version, created_at)
+                salt bytea NULL, created_at)
 options        (poll_id, idx smallint, label,                       PK (poll_id, idx))
 results        (poll_id, partition, option_idx, counted, total, last_offset,
                                                                     PK (poll_id, partition, option_idx))

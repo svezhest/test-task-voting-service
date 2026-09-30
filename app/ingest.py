@@ -12,7 +12,7 @@ import psycopg
 from aiokafka import AIOKafkaProducer
 from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt
 
 from app.record import Vote, encode
 
@@ -23,21 +23,26 @@ polls = {}  # non-draft poll_id -> (type, salt, window_start, window_end + grace
 producer: AIOKafkaProducer
 
 
-# STUB: re-reads all non-draft polls every second (as in contracts), not only changes since config_version (architecture.md).
-async def refresh_polls():
+# STUB: api.md lists polls.config_version, but nothing needs it: ingest re-reads all non-draft polls every second
+# (contracts.md), so the column is not created.
+async def load_polls():
     global polls
+    try:
+        async with await psycopg.AsyncConnection.connect(os.environ["DATABASE_URL"]) as conn:
+            cur = await conn.execute(
+                """select p.id, p.type, p.salt, extract(epoch from p.window_start)::float8,
+                          extract(epoch from p.window_end)::float8 + p.grace_s, array_agg(o.idx)
+                     from polls p join options o on o.poll_id = p.id
+                    where p.status <> 'draft' group by p.id"""
+            )
+            polls = {row[0]: row[1:] for row in await cur.fetchall()}
+    except psycopg.Error as e:  # Postgres is down: keep working on the last polls
+        print("polls refresh failed:", e, flush=True)
+
+
+async def refresh_polls():
     while True:
-        try:
-            async with await psycopg.AsyncConnection.connect(os.environ["DATABASE_URL"]) as conn:
-                cur = await conn.execute(
-                    """select p.id, p.type, p.salt, extract(epoch from p.window_start)::float8,
-                              extract(epoch from p.window_end)::float8 + p.grace_s, array_agg(o.idx)
-                         from polls p join options o on o.poll_id = p.id
-                        where p.status <> 'draft' group by p.id"""
-                )
-                polls = {row[0]: row[1:] for row in await cur.fetchall()}
-        except psycopg.Error as e:  # Postgres is down: keep working on the last polls
-            print("polls refresh failed:", e, flush=True)
+        await load_polls()
         await asyncio.sleep(1)
 
 
@@ -63,8 +68,8 @@ async def bad_request(request, exc):
 
 
 class VoteIn(BaseModel):
-    poll_id: uuid.UUID  # STUB: question — poll_id that is not a UUID gets 400 (body does not parse), not 404; docs name only voter_id
-    options: list[int]
+    poll_id: uuid.UUID
+    options: list[StrictInt]
     voter_id: uuid.UUID
     fp: dict
 
@@ -72,10 +77,14 @@ class VoteIn(BaseModel):
 @app.post("/api/vote", status_code=204)
 async def vote(body: VoteIn, request: Request):
     xff = request.headers.get("x-forwarded-for")
+    raw = request.headers.get("cf-connecting-ip") or (xff.split(",")[0] if TRUST_XFF and xff else request.client.host)
     try:
-        ip = ipaddress.ip_address(xff.split(",")[0].strip() if TRUST_XFF and xff else request.client.host)
+        ip = ipaddress.ip_address(raw.strip())
     except ValueError:  # STUB: question — an unparsable client IP is not in docs; treated as a bad request
         return Response(status_code=400)
+    ip = getattr(ip, "ipv4_mapped", None) or ip  # ::ffff:a.b.c.d -> a.b.c.d
+    if body.poll_id not in polls:  # activated less than a second ago?
+        await load_polls()
     poll = polls.get(body.poll_id)
     if poll is None:
         return Response(status_code=404)

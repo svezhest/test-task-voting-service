@@ -17,7 +17,6 @@ class Vote:
     voter_id: uuid.UUID
 
 
-# STUB: UUIDs are packed as uuid.bytes (RFC 4122 byte order); api.md says "little-endian" but not how to lay out a UUID.
 def encode(v: Vote) -> bytes:
     return FORMAT.pack(VERSION, v.poll_id.bytes, v.options, v.received_at_ms, v.ip_hmac, v.fp_hash, v.voter_id.bytes)
 

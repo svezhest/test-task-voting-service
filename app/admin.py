@@ -3,13 +3,14 @@ import os
 import shutil
 import urllib.request
 import uuid
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated, Literal
 
 import psycopg
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.encoders import jsonable_encoder
+from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from psycopg.rows import dict_row
 from pydantic import AwareDatetime, BaseModel, Field, ValidationError, model_validator
 
@@ -20,6 +21,13 @@ def check_token(authorization: str = Header("")):
 
 
 app = FastAPI(dependencies=[Depends(check_token)])
+
+
+@app.exception_handler(RequestValidationError)
+async def invalid_id(request, exc):  # a poll id that is not a UUID is an unknown poll
+    if any(e["loc"][:1] == ("path",) for e in exc.errors()):
+        return await http_exception_handler(request, HTTPException(404))
+    return await request_validation_exception_handler(request, exc)
 
 
 NonBlank = Annotated[str, Field(pattern=r"\S")]  # at least one non-whitespace character
@@ -59,17 +67,20 @@ def get_poll(conn, poll_id):
     return poll
 
 
-def get_received(conn, poll_id):
-    return conn.execute(
-        "select coalesce(sum(votes), 0)::bigint as n from stage_progress where poll_id = %s and stage = 1", (poll_id,)
-    ).fetchone()["n"]
+def change(conn, poll_id, sql, params):
+    """Atomic change: `sql` updates the poll only in the allowed status and returns its id; otherwise 404 or 409."""
+    if conn.execute(sql, params).fetchone() is None:
+        get_poll(conn, poll_id)  # 404 if unknown
+        raise HTTPException(409)
+    return get_poll(conn, poll_id)
 
 
-def get_votes(conn, poll_id):  # root counted and total: rows with option_idx = -1
+def totals(conn, poll_id):  # received (stage 1); root counted and total (results rows with option_idx = -1)
     return conn.execute(
-        """select coalesce(sum(counted), 0)::bigint as counted, coalesce(sum(total), 0)::bigint as total
-             from results where poll_id = %s and option_idx = -1""",
-        (poll_id,),
+        """select (select coalesce(sum(votes), 0) from stage_progress where poll_id = %(id)s and stage = 1)::bigint as received,
+                  coalesce(sum(counted), 0)::bigint as counted, coalesce(sum(total), 0)::bigint as total
+             from results where poll_id = %(id)s and option_idx = -1""",
+        {"id": poll_id},
     ).fetchone()
 
 
@@ -103,42 +114,34 @@ def update_poll(poll_id: uuid.UUID, patch: dict):
         try:
             new = PollIn(**(poll | patch))
         except ValidationError as e:
-            raise HTTPException(422, str(e))
-        conn.execute(
-            "update polls set question = %s, type = %s, window_start = %s, window_end = %s, grace_s = %s where id = %s",
-            (new.question, new.type, new.window_start, new.window_end, new.grace_s, poll_id),
-        )
+            raise RequestValidationError(e.errors(include_url=False))
+        change(conn, poll_id, """update polls set question = %s, type = %s, window_start = %s, window_end = %s, grace_s = %s
+                                  where id = %s and status = 'draft' returning id""",
+               (new.question, new.type, new.window_start, new.window_end, new.grace_s, poll_id))
         set_options(conn, poll_id, new.options)
         return get_poll(conn, poll_id)
 
 
-# STUB: config_version is never bumped — per contracts, ingest re-reads all non-draft polls every second.
 @app.post("/admin/polls/{poll_id}/activate")
 def activate_poll(poll_id: uuid.UUID):
     with db() as conn:
-        poll = get_poll(conn, poll_id)
-        if poll["status"] != "draft" or datetime.now(timezone.utc) > poll["window_end"] + timedelta(seconds=poll["grace_s"]):
-            raise HTTPException(409)
-        conn.execute("update polls set status = 'active', salt = %s where id = %s", (os.urandom(32), poll_id))
+        poll = change(conn, poll_id, """update polls set status = 'active', salt = %s
+                                         where id = %s and status = 'draft' and now() <= window_end + make_interval(secs => grace_s)
+                                     returning id""", (os.urandom(32), poll_id))
         config = {k: poll[k] for k in ("id", "question", "type", "options", "window_start", "window_end", "grace_s")}
         path = Path(os.environ["WEB_ROOT"], "p", str(poll_id), "config.json")
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(jsonable_encoder(config), ensure_ascii=False))
-        return poll | {"status": "active"}
+        return poll
 
 
 # config.json keeps the old window_end on purpose: the page only renders the question, the window is enforced by ingest.
 @app.post("/admin/polls/{poll_id}/finish")
 def finish_poll(poll_id: uuid.UUID):
     with db() as conn:
-        if conn.execute(
-            """update polls set window_end = now()
-                where id = %s and status = 'active' and window_start <= now() and now() < window_end returning id""",
-            (poll_id,),
-        ).fetchone() is None:
-            get_poll(conn, poll_id)  # 404 if unknown
-            raise HTTPException(409)
-        return get_poll(conn, poll_id)
+        return change(conn, poll_id, """update polls set window_end = now()
+                                         where id = %s and status = 'active' and window_start <= now() and now() < window_end
+                                     returning id""", (poll_id,))
 
 
 @app.delete("/admin/polls/{poll_id}", status_code=204)
@@ -179,27 +182,18 @@ def read_poll(poll_id: uuid.UUID):
 def poll_results(poll_id: uuid.UUID):
     with db() as conn:
         status = get_poll(conn, poll_id)["status"]
-        received = get_received(conn, poll_id)
+        t = totals(conn, poll_id)
         if status != "final":
-            return {"status": status, "received": received}
-        votes = get_votes(conn, poll_id)
+            return {"status": status, "received": t["received"]}
         options = conn.execute(
             """select o.idx, o.label, coalesce(sum(r.counted), 0)::bigint as counted, coalesce(sum(r.total), 0)::bigint as total
                  from options o left join results r on r.poll_id = o.poll_id and r.option_idx = o.idx
                 where o.poll_id = %s group by o.idx, o.label order by o.idx""",
             (poll_id,),
         ).fetchall()
-    counted, total = votes["counted"], votes["total"]
     for o in options:
-        o["share"] = o["counted"] / counted if counted else None
-    return {
-        "status": status,
-        "received": received,
-        "total": total,
-        "counted": counted,
-        "over_limit_share": 1 - counted / total if total else None,
-        "options": options,
-    }
+        o["share"] = o["counted"] / t["counted"] if t["counted"] else None
+    return {"status": status, **t, "over_limit_share": 1 - t["counted"] / t["total"] if t["total"] else None, "options": options}
 
 
 BUCKETS = ["1", "2-10", "11-100", "101+"]
@@ -222,15 +216,14 @@ def poll_analytics(poll_id: uuid.UUID):
         }
         if poll["status"] != "final":
             return answer
-        received = get_received(conn, poll_id)
-        votes = get_votes(conn, poll_id)
+        t = totals(conn, poll_id)
         stats = conn.execute("select key_limit, ip_ceiling, ip_hist from stage2_stats where poll_id = %s", (poll_id,)).fetchall()
     answer["funnel"] = {
-        "received": received,
-        "unique_voters": votes["total"],
-        "counted": votes["counted"],
+        "received": t["received"],
+        "unique_voters": t["total"],
+        "counted": t["counted"],
         "rejected": {
-            "repeat_voter": received - votes["total"],
+            "repeat_voter": t["received"] - t["total"],
             "key_limit": sum(s["key_limit"] for s in stats),
             "ip_ceiling": sum(s["ip_ceiling"] for s in stats),
         },

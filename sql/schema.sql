@@ -7,7 +7,6 @@ create table polls (
     window_end     timestamptz not null,
     grace_s        integer not null,
     salt           bytea,
-    config_version bigint not null default 0,
     created_at     timestamptz not null default now()
 );
 

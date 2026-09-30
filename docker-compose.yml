@@ -4,7 +4,7 @@ x-app: &app
   environment:
     DATABASE_URL: postgresql://postgres:postgres@postgres/postgres
     KAFKA_BOOTSTRAP: redpanda:9092
-    ADMIN_TOKEN: dev-token
+    ADMIN_TOKEN: ${ADMIN_TOKEN:-dev-token}
     TRUST_XFF: "1"
     DELIVERY_TIMEOUT_S: "3"
     WEB_ROOT: /srv/web
@@ -53,17 +53,15 @@ services:
 
   nginx:
     image: nginx:1.27-alpine
-    ports: ["8090:80"]
+    ports: ["8090:80", "127.0.0.1:8091:81"]
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./web:/srv/static:ro
       - published:/srv/web:ro
-    depends_on: [admin, ingest]
 
   cloudflared:
-    image: cloudflare/cloudflared
+    image: cloudflare/cloudflared:2026.9.3
     command: tunnel --no-autoupdate --metrics 0.0.0.0:2000 --url http://nginx:80
-    depends_on: [nginx]
 
 volumes:
   published:

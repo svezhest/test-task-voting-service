@@ -1,5 +1,6 @@
 import asyncio
 import os
+import struct
 from collections import Counter, defaultdict
 
 import numpy
@@ -25,19 +26,13 @@ on conflict (poll_id, partition) do update
    set key_limit = excluded.key_limit, ip_ceiling = excluded.ip_ceiling, ip_hist = excluded.ip_hist, last_offset = excluded.last_offset
  where excluded.last_offset > stage2_stats.last_offset"""
 BUCKETS = ["1", "2-10", "11-100", "101+"]
-
-
-def pack_counts(counts):  # c(f) block: 8-byte fp_hash + 8-byte count, repeated
-    return b"".join(f + n.to_bytes(8, "little") for f, n in counts.items())
-
-
-def unpack_counts(blob):
-    return {blob[i:i + 8]: int.from_bytes(blob[i + 8:i + 16], "little") for i in range(0, len(blob), 16)}
+BLOCK = struct.Struct("<8sQ")  # fp_counts blob entry: fp_hash, c(f)
 
 
 # STUB: the partition is read once and kept in memory for both passes instead of being re-read from Kafka.
-async def read_partition(consumer, p, poll_id, start_ms):
-    """Poll votes from window_start to the end of the partition, first one per voter_id; and the end offset."""
+async def read_partition(consumer, p, poll_id, start_ms, end_ms):
+    """Poll votes from window_start to the end of the partition, received by window_end + grace_s,
+    first one per voter_id; and the end offset."""
     tp = TopicPartition("votes_by_ip", p)
     consumer.assign([tp])
     end = (await consumer.end_offsets([tp]))[tp]
@@ -48,33 +43,32 @@ async def read_partition(consumer, p, poll_id, start_ms):
         while await consumer.position(tp) < end:
             for m in (await consumer.getmany(tp, timeout_ms=1000)).get(tp, []):
                 v = decode(m.value)
-                if m.offset < end and v.poll_id == poll_id and v.voter_id not in seen:
+                if m.offset < end and v.poll_id == poll_id and v.received_at_ms <= end_ms and v.voter_id not in seen:
                     seen.add(v.voter_id)
                     votes.append(v)
     return votes, end
 
 
-async def count_poll(db, consumer, poll_id, start_ms, window_s):
-    parts = {p: await read_partition(consumer, p, poll_id, start_ms) for p in MINE}
-
-    # pass 1: c(f) of each partition
+async def pass1(db, consumer, poll_id, start_ms, end_ms):  # c(f) of each partition of this worker
+    parts = {p: await read_partition(consumer, p, poll_id, start_ms, end_ms) for p in MINE}
     for p, (votes, _) in parts.items():
         await db.execute(
             "insert into fp_counts values (%s, %s, %s) on conflict (poll_id, partition) do update set blob = excluded.blob",
-            (poll_id, p, pack_counts(Counter(v.fp_hash for v in votes))),
+            (poll_id, p, b"".join(BLOCK.pack(*fc) for fc in Counter(v.fp_hash for v in votes).items())),
         )
-    while (await (await db.execute("select count(*) from fp_counts where poll_id = %s", (poll_id,))).fetchone())[0] < PARTITIONS:
-        await asyncio.sleep(1)
+    return parts
 
-    # merge
+
+async def pass2(db, poll_id, parts, window_s):
+    # merge: in a fixed order, so every worker and every rerun gets the same p
     c = Counter()
-    for (blob,) in await (await db.execute("select blob from fp_counts where poll_id = %s", (poll_id,))).fetchall():
-        c.update(unpack_counts(blob))
-    share = {f: n / c.total() for f, n in c.items()}
+    for (blob,) in await (await db.execute("select blob from fp_counts where poll_id = %s order by partition", (poll_id,))).fetchall():
+        c.update(dict(BLOCK.iter_unpack(blob)))
+    c_total = c.total()
+    share = {f: c[f] / c_total for f in sorted(c)}
     p_all = numpy.array(list(share.values()))
     r, ceiling = repeat_budget(window_s), ip_ceiling(window_s)
 
-    # pass 2
     for p, (votes, end) in parts.items():
         fps = defaultdict(set)  # D(IP)
         voters = Counter()  # V(key), key = (ip_hmac, fp_hash)
@@ -119,6 +113,7 @@ async def main():
     db = await psycopg.AsyncConnection.connect(os.environ["DATABASE_URL"], autocommit=True)
     consumer = AIOKafkaConsumer(bootstrap_servers=os.environ["KAFKA_BOOTSTRAP"], enable_auto_commit=False)
     await consumer.start()
+    waiting, done = {}, set()  # poll_id -> partitions read in pass 1; polls whose results this worker has written
     while True:
         await db.execute(
             """update polls set status = 'counting', salt = null
@@ -126,14 +121,24 @@ async def main():
             (DELIVERY_TIMEOUT_S,),
         )
         ready = await (await db.execute(
-            """select id, extract(epoch from window_start)::float8 * 1000, extract(epoch from window_end - window_start)::float8 + grace_s
+            """select id, extract(epoch from window_start)::float8 * 1000,
+                      extract(epoch from window_end)::float8 * 1000 + grace_s * 1000,
+                      extract(epoch from window_end - window_start)::float8 + grace_s,
+                      (select count(*) from fp_counts where poll_id = polls.id) = %s
                  from polls
                 where status = 'counting'
                   and (select count(*) from stage_progress where poll_id = polls.id and stage = 1 and done_at is not null) = %s""",
-            (PARTITIONS,),
+            (PARTITIONS, PARTITIONS),
         )).fetchall()
-        for poll_id, start_ms, window_s in ready:
-            await count_poll(db, consumer, poll_id, int(start_ms), window_s)
+        # the barrier never blocks: pass 1 for every ready poll, pass 2 once fp_counts of all partitions are in
+        for poll_id, start_ms, end_ms, window_s, barrier in ready:
+            if poll_id in done:  # another worker writes the last results and sets final
+                continue
+            if poll_id not in waiting:
+                waiting[poll_id] = await pass1(db, consumer, poll_id, int(start_ms), end_ms)
+            elif barrier:
+                await pass2(db, poll_id, waiting.pop(poll_id), window_s)
+                done.add(poll_id)
         await asyncio.sleep(1)
 
 
