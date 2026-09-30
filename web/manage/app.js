@@ -12,9 +12,16 @@ const short = n => new Intl.NumberFormat('ru-RU', { notation: 'compact', maximum
 const pct = x => x == null ? '—' : (x * 100).toFixed(1).replace('.', ',') + '%';
 const dt = s => new Date(s).toLocaleString('ru-RU');
 const when = s => new Date(s).toLocaleString('ru-RU', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' });
-const STATUS = { draft: 'Черновик', active: 'Идёт голосование', counting: 'Подсчёт', final: 'Готово' };
+const STATUS = { draft: 'Черновик', planned: 'Запланирован', active: 'Идёт голосование', counting: 'Подсчёт', final: 'Готово' };
 const TYPE = { single: 'Один вариант ответа', multi: 'Несколько вариантов ответа' };
-const badge = s => `<span class="badge s-${esc(s)}">${esc(STATUS[s] || s)}</span>`;
+// Показываемый статус считаем из status и часов: active до начала окна — «Запланирован»,
+// после window_end + grace_s, пока сервер не перевёл в counting, — уже «Подсчёт».
+const phase = (p, status = p.status) => {
+  if (status !== 'active') return status;
+  const now = Date.now();
+  return now < new Date(p.window_start) ? 'planned' : now <= +new Date(p.window_end) + p.grace_s * 1000 ? 'active' : 'counting';
+};
+const badge = (p, status) => { const s = phase(p, status); return `<span class="badge s-${esc(s)}">${esc(STATUS[s] || s)}</span>`; };
 
 // ---------- местное время для полей datetime-local ----------
 
@@ -198,15 +205,29 @@ async function listView(g) {
   $('#q').oninput = () => { query = $('#q').value; apply(polls); };
   $('#reset').onclick = () => { pick = query = ''; $('#q').value = ''; apply(polls); };
   apply(polls);
+  tick(polls, g);
+}
+
+// Раз в секунду: статусы в строках, мигание в календаре и счётчик «идут сейчас» — по часам, без запросов.
+function tick(polls, g) {
+  if (g !== gen) return;
+  const live = {};
+  for (const p of polls) if (phase(p) === 'active') { const k = startKey(p); live[k] = live[k.slice(0, 7)] = true; }
+  main.querySelectorAll('.cal [data-d]').forEach(c => c.classList.toggle('live', !!live[c.dataset.d]));
+  main.querySelectorAll('.mon').forEach(b => b.firstChild.classList.toggle('live', !!live[b.dataset.m]));
+  const n = polls.filter(p => phase(p) === 'active').length;
+  $('#now').innerHTML = n ? ` · <span class="go">${num(n)} ${plural(n, 'идёт', 'идут', 'идут')} сейчас</span>` : '';
+  const byId = Object.fromEntries(polls.map(p => [p.id, p]));
+  main.querySelectorAll('tr[data-id]').forEach(tr => { const b = badge(byId[tr.dataset.id]); if (tr.children[1].innerHTML !== b) tr.children[1].innerHTML = b; });
+  timer = setTimeout(() => tick(polls, g), 1000);
 }
 
 // Календарь как у GitHub: колонки — недели с понедельника, строки — дни; последние 12 месяцев до конца текущей недели.
 function calendar(polls) {
-  const n = {}, live = {};
+  const n = {};   // мигание «идёт голосование» расставляет tick()
   for (const p of polls) {
     const k = startKey(p), m = k.slice(0, 7);
     n[k] = (n[k] || 0) + 1; n[m] = (n[m] || 0) + 1;
-    if (p.status === 'active') live[k] = live[m] = true;
   }
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const d = new Date(today); d.setDate(d.getDate() - 364); d.setDate(d.getDate() - (d.getDay() + 6) % 7);
@@ -221,20 +242,19 @@ function calendar(polls) {
     for (let i = 0; i < 7; i++, d.setDate(d.getDate() + 1)) {
       const k = dayKey(d), c = n[k] || 0;
       if (d <= today) year += c;
-      days += `<i data-d="${k}" data-t="${dayName(k)} · ${c ? polls_(c) : 'опросов нет'}" class="l${lvl(c, dmax)}${live[k] ? ' live' : ''}${d > today && !c ? ' later' : ''}"></i>`;
+      days += `<i data-d="${k}" data-t="${dayName(k)} · ${c ? polls_(c) : 'опросов нет'}" class="l${lvl(c, dmax)}${d > today && !c ? ' later' : ''}"></i>`;
     }
     // неделя относится к месяцу своего воскресенья: подпись месяца встаёт над неделей с его первым числом;
     // у месяца в одну неделю подписи нет — кроме текущего, его подпись заходит за край
     const m = dayKey(new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1)).slice(0, 7);
     if (heads.length && heads.at(-1).m === m) heads.at(-1).span++; else heads.push({ m, span: 1 });
   }
-  const liveNow = polls.filter(p => p.status === 'active').length;
   return `<section class="cal">
-    <div class="cal-top"><p class="mono"><b>${polls_(year)}</b> за год${liveNow ? ` · <span class="go">${num(liveNow)} ${plural(liveNow, 'идёт', 'идут', 'идут')} сейчас</span>` : ''}</p>
+    <div class="cal-top"><p class="mono"><b>${polls_(year)}</b> за год<span id="now"></span></p>
       <p class="scale mono small muted">меньше${[0, 1, 2, 3, 4].map(l => `<i class="l${l}"></i>`).join('')}больше</p></div>
     <div class="cal-scroll"><div class="cal-in">
       <div class="months"><span></span>${heads.map((h, i) => h.span < 2 && i < heads.length - 1 ? `<span style="grid-column:span ${h.span}"></span>`
-        : `<button class="mon" data-m="${h.m}" style="grid-column:span ${h.span}" title="${monName(h.m)} · ${n[h.m] ? polls_(n[h.m]) : 'опросов нет'}"><i class="l${lvl(n[h.m] || 0, mmax)}${live[h.m] ? ' live' : ''}"></i>${MON[+h.m.slice(5) - 1]}</button>`).join('')}</div>
+        : `<button class="mon" data-m="${h.m}" style="grid-column:span ${h.span}" title="${monName(h.m)} · ${n[h.m] ? polls_(n[h.m]) : 'опросов нет'}"><i class="l${lvl(n[h.m] || 0, mmax)}"></i>${MON[+h.m.slice(5) - 1]}</button>`).join('')}</div>
       <div class="days"><span></span><span>пн</span><span></span><span>ср</span><span></span><span>пт</span><span></span>${days}</div>
       <div id="tip" class="tip mono" hidden></div>
     </div></div></section>`;
@@ -255,7 +275,7 @@ function apply(polls) {
       return `<tr data-id="${esc(p.id)}">
       <td><a href="#/p/${esc(p.id)}">${hl(p.question, q) || '<span class="muted">без вопроса</span>'}</a>
         <div class="opts">${opts.map(o => hl(o.label, q)).join('<span> · </span>')}</div></td>
-      <td>${badge(p.status)}</td>
+      <td>${badge(p)}</td>
       <td class="mono small muted">${when(p.window_start)}</td></tr>`;
     }).join('')}</tbody></table>`
     : '<div class="empty"><p>Ничего не нашлось.</p><p class="muted small">Попробуйте другое слово или сбросьте фильтры.</p></div>';
@@ -412,7 +432,7 @@ async function pollView(id, g) {
   if (g !== gen) return;
   const draft = p.status === 'draft', final = p.status === 'final';
   main.innerHTML = `<a class="mono small muted" href="#/">← все опросы</a>
-  <div class="head" style="margin-top:32px"><h1>${esc(p.question)}</h1><span id="st">${badge(p.status)}</span></div>
+  <div class="head" style="margin-top:32px"><h1>${esc(p.question)}</h1><span id="st">${badge(p)}</span></div>
   ${draft ? '<p class="notice">Черновик: зрители его не видят, его можно менять. После запуска изменить или удалить опрос будет нельзя.</p>'
     : final ? '' : '<p class="notice" id="notice"></p><div class="actions" id="finrow"><button class="ghost" id="fin">Завершить досрочно</button></div>'}
   ${draft ? `<div class="actions"><button id="act">Запустить</button>
@@ -451,8 +471,12 @@ async function pollView(id, g) {
 // (window_start ≤ сейчас < window_end), поэтому кнопку показываем только тогда.
 function live(p, status) {
   if (!$('#notice')) return;
-  const now = Date.now(), can = status === 'active' && now >= new Date(p.window_start) && now < new Date(p.window_end);
-  $('#notice').textContent = 'Опрос запущен: изменить или удалить его нельзя' + (can ? ', но можно завершить досрочно.' : ' до завершения.');
+  const now = Date.now(), start = new Date(p.window_start), can = status === 'active' && now >= start && now < new Date(p.window_end);
+  // время начала: сегодня — только часы, иначе с датой; секунды — если они есть
+  const at = start.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', ...(start.getSeconds() && { second: '2-digit' }) });
+  const day = dayKey(start) === dayKey(new Date()) ? 'в ' : start.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' }) + ' в ';
+  $('#notice').textContent = phase(p, status) === 'planned' ? `Опрос запланирован: голосование начнётся ${day}${at}. Изменить или удалить его нельзя.`
+    : 'Опрос запущен: изменить или удалить его нельзя' + (can ? ', но можно завершить досрочно.' : ' до завершения.');
   $('#finrow').hidden = !can;
 }
 
@@ -466,7 +490,7 @@ async function loop(p, g) {
     final = res.status === 'final';
     // опрос завершился у нас на глазах: перерисовать карточку целиком — без ссылки, с кнопкой «Удалить»
     if (final && p.status !== 'final') return route();
-    $('#st').innerHTML = badge(res.status);
+    $('#st').innerHTML = badge(p, res.status);
     live(p, res.status);
     $('#an').innerHTML = final ? finalHtml(res, an, p) : liveHtml(res, an, p);
   } catch (e) {

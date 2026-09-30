@@ -2,8 +2,8 @@
   color-scheme: light dark;
   --bg: #fbfbfa; --fg: #1b1c1e; --muted: #6c6d72; --line: #dedfdb; --soft: #f1f1ee;
   --accent: #2a6b7c; --accent-soft: #c9dfe4; --err: #a4372c;
-  /* статусы-светофор: текст, фон */
-  --go: #2c6e37; --go-bg: #e1f0df; --wait: #7a5a00; --wait-bg: #f7ecc6; --stop: #9c3328; --stop-bg: #f6e1dd;
+  /* статусы: текст, фон */
+  --go: #2c6e37; --go-bg: #e1f0df; --wait: #7a5a00; --wait-bg: #f7ecc6;
   --qr-dark: #1b1c1e; --qr-light: #ffffff;
   /* календарь: пять ступеней акцента, от «ни одного» до «много» */
   --c0: #ebece8; --c1: #c9dfe4; --c2: #8cbcc9; --c3: #4d8ea0; --c4: #2a6b7c; --mark: #f3e3a6;
@@ -14,7 +14,7 @@
   :root {
     --bg: #111213; --fg: #e7e7e4; --muted: #9a9ba0; --line: #2d2e31; --soft: #1a1b1d;
     --accent: #7db6c5; --accent-soft: #29434a; --err: #e27c70;
-    --go: #8fd197; --go-bg: #1b3020; --wait: #e6c768; --wait-bg: #342c12; --stop: #ec8a7e; --stop-bg: #3a1f1b;
+    --go: #8fd197; --go-bg: #1b3020; --wait: #e6c768; --wait-bg: #342c12;
     --qr-dark: #111213; --qr-light: #e7e7e4;
     --c0: #1d1e20; --c1: #203b42; --c2: #2c5f6c; --c3: #4d8d9d; --c4: #86c2d1; --mark: #5a4a14;
   }
@@ -67,14 +67,15 @@ td { padding: 20px 16px 20px 0; border-bottom: 1px solid var(--line); vertical-a
 .list td a { text-decoration: none; }
 .r { text-align: right; }
 
-/* статус — плашка одной ширины, цвет как у светофора; квадратик мигает только у идущего голосования */
+/* статус — плашка одной ширины; квадратик мигает только у идущего голосования */
 .badge { display: inline-block; width: 21ch; text-align: center; font-size: 12px; padding: 3px 8px; white-space: nowrap;
   color: var(--muted); background: var(--soft); border: 1px solid var(--line); }
 .s-active { color: var(--go); background: var(--go-bg); border-color: currentColor; }
 .s-active::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 7px; background: currentColor;
   vertical-align: 1px; animation: blink 1.6s steps(2) infinite; }
-.s-counting { color: var(--wait); background: var(--wait-bg); border-color: currentColor; }
-.s-draft { color: var(--stop); background: var(--stop-bg); border-color: currentColor; }
+.s-planned { color: var(--go); background: transparent; border-color: currentColor; }
+.s-counting { color: var(--accent); background: var(--accent-soft); border-color: currentColor; }
+.s-draft { color: var(--wait); background: var(--wait-bg); border-color: currentColor; }
 @keyframes blink { 50% { opacity: 0; } }
 
 /* ---------- главная: календарь, фильтр, поиск ---------- */
