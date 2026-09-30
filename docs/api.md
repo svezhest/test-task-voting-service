@@ -67,7 +67,8 @@ draft ──activate──► active ──конец окна + допуск─
 ```json
 {
   "status": "final",
-  "received": 25000000,
+  "received": 25300000,
+  "total": 25000000,
   "counted": 24100000,
   "over_limit_share": 0.036,
   "options": [
@@ -77,7 +78,7 @@ draft ──activate──► active ──конец окна + допуск─
 }
 ```
 
-- `counted` — засчитанные голоса, `total` — все, включая голоса сверх лимита.
+- `received` — все пришедшие голоса; `total` — после «один голос на `voter_id`»; `counted` — засчитанные после лимитов. Точные определения — в [contracts.md](contracts.md).
 - `share` считается от засчитанных.
 
 ## Postgres
@@ -88,7 +89,8 @@ polls          (id uuid PK, question, type, status, window_start, window_end, gr
 options        (poll_id, idx smallint, label,                       PK (poll_id, idx))
 results        (poll_id, partition, option_idx, counted, total, last_offset,
                                                                     PK (poll_id, partition, option_idx))
-stage_progress (poll_id, stage, partition, end_offset, done_at,     PK (poll_id, stage, partition))
+stage_progress (poll_id, stage, partition, votes, end_offset, done_at,
+                                                                    PK (poll_id, stage, partition))
 fp_counts      (poll_id, partition, blob bytea,                     PK (poll_id, partition))
 ```
 
