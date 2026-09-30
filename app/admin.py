@@ -126,6 +126,20 @@ def activate_poll(poll_id: uuid.UUID):
         return poll | {"status": "active"}
 
 
+# config.json keeps the old window_end on purpose: the page only renders the question, the window is enforced by ingest.
+@app.post("/admin/polls/{poll_id}/finish")
+def finish_poll(poll_id: uuid.UUID):
+    with db() as conn:
+        if conn.execute(
+            """update polls set window_end = now()
+                where id = %s and status = 'active' and window_start <= now() and now() < window_end returning id""",
+            (poll_id,),
+        ).fetchone() is None:
+            get_poll(conn, poll_id)  # 404 if unknown
+            raise HTTPException(409)
+        return get_poll(conn, poll_id)
+
+
 @app.delete("/admin/polls/{poll_id}", status_code=204)
 def delete_poll(poll_id: uuid.UUID):
     with db() as conn:
