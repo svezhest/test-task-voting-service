@@ -24,7 +24,7 @@ docker-compose.yml, Makefile, pyproject.toml
 
 ## Стенд
 
-Всё доступно через nginx на `http://localhost:8080`:
+Всё доступно через nginx на `http://localhost:8090`:
 - `/p/{poll_id}` → `web/index.html` (для любого `poll_id`);
 - `/p/{poll_id}/config.json` → файл, который публикует админка;
 - `/api/` → приём;
@@ -123,7 +123,7 @@ def ip_ceiling(window_seconds: float) -> int
 
 ## Сквозные тесты
 
-Работают против поднятого стенда только через HTTP (`http://localhost:8080`, токен `dev-token`).
+Работают против поднятого стенда только через HTTP (`http://localhost:8090`, токен `dev-token`).
 - IP клиента задаётся заголовком `X-Forwarded-For`.
 - Короткие окна: тест создаёт опрос с окном, которое начинается сейчас и длится несколько секунд, `grace_s` = 0.
 - Итог ждут, опрашивая `GET /admin/polls/{id}/results` до `status = final`. Разумный таймаут — 60 с после конца окна.

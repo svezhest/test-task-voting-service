@@ -1,0 +1,63 @@
+x-app: &app
+  build: .
+  restart: on-failure
+  environment:
+    DATABASE_URL: postgresql://postgres:postgres@postgres/postgres
+    KAFKA_BOOTSTRAP: redpanda:9092
+    ADMIN_TOKEN: dev-token
+    TRUST_XFF: "1"
+    DELIVERY_TIMEOUT_S: "3"
+    WEB_ROOT: /srv/web
+    STAGE2_WORKERS: "1"
+    STAGE2_WORKER_INDEX: "0"
+  depends_on:
+    postgres: {condition: service_healthy}
+    topics: {condition: service_completed_successfully}
+
+services:
+  postgres:
+    image: postgres:17
+    environment: {POSTGRES_PASSWORD: postgres}
+    volumes: [./sql/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro]
+    healthcheck: {test: pg_isready -h localhost -U postgres, interval: 1s, retries: 60}
+
+  redpanda:
+    image: redpandadata/redpanda:v24.3.6
+    command: redpanda start --mode dev-container --smp 1 --kafka-addr 0.0.0.0:9092 --advertise-kafka-addr redpanda:9092
+    healthcheck: {test: rpk cluster health --exit-when-healthy, interval: 1s, retries: 60}
+
+  topics:
+    image: redpandadata/redpanda:v24.3.6
+    entrypoint: rpk
+    command: topic create votes_raw votes_by_ip -p 8 -X brokers=redpanda:9092
+    depends_on: {redpanda: {condition: service_healthy}}
+
+  admin:
+    <<: *app
+    command: uvicorn app.admin:app --host 0.0.0.0
+    volumes: [published:/srv/web]
+
+  ingest:
+    <<: *app
+    command: uvicorn app.ingest:app --host 0.0.0.0
+    deploy: {replicas: 2}
+
+  stage1:
+    <<: *app
+    command: python -m app.stage1
+
+  stage2:
+    <<: *app
+    command: python -m app.stage2
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports: ["8090:80"]
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./web:/srv/static:ro
+      - published:/srv/web:ro
+    depends_on: [admin, ingest]
+
+volumes:
+  published:

@@ -1,0 +1,18 @@
+[project]
+name = "voting-service"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi",
+    "uvicorn",
+    "aiokafka[lz4]",
+    "psycopg[binary]",
+    "numpy",
+    "scipy",
+]
+
+[dependency-groups]
+dev = ["pytest", "httpx"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
