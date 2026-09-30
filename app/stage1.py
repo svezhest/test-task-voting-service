@@ -16,28 +16,34 @@ POLLS = """
 select id, extract(epoch from window_start)::float8 * 1000, extract(epoch from window_end)::float8 * 1000 + grace_s * 1000,
        now() > window_end + make_interval(secs => grace_s + %s)
   from polls where status in ('active', 'counting')"""
-PROGRESS = """
-insert into stage_progress (poll_id, stage, partition, votes, end_offset) values (%s, 1, %s, %s, %s)
+# rows only for a poll that still exists and is not final
+LIVE = "where exists (select 1 from polls where id = %(poll)s and status <> 'final')"
+PROGRESS = f"""
+insert into stage_progress (poll_id, stage, partition, votes, end_offset) select %(poll)s, 1, %(part)s, %(votes)s, %(offset)s {LIVE}
 on conflict (poll_id, stage, partition) do update set votes = excluded.votes, end_offset = excluded.end_offset
  where excluded.end_offset > stage_progress.end_offset"""
-TIMELINE = """
-insert into timeline (poll_id, partition, second, votes) values (%s, %s, %s, %s)
+TIMELINE = f"""
+insert into timeline (poll_id, partition, second, votes) select %(poll)s, %(part)s, %(second)s, %(votes)s {LIVE}
 on conflict (poll_id, partition, second) do update set votes = excluded.votes"""
 DONE = "update stage_progress set done_at = now() where poll_id = %s and stage = 1 and partition = %s and done_at is null"
 
 
-async def report(db, consumer, producer, polls, votes, timeline):
+async def read_polls(db):
+    return {row[0]: row[1:] for row in await (await db.execute(POLLS, (DELIVERY_TIMEOUT_S,))).fetchall()}
+
+
+async def report(db, consumer, polls, votes, timeline, changed):
     ends = await consumer.end_offsets(PARTITIONS)  # taken after the close_at check
     for poll_id, (_, _, closed) in polls.items():
         for tp in PARTITIONS:
             position = await consumer.position(tp)
             key = (poll_id, tp.partition)
+            row = {"poll": poll_id, "part": tp.partition}
             # timeline only when progress moved forward: a restarted stage 1 does not roll the curve back
-            if (await db.execute(PROGRESS, (*key, votes[key], position))).rowcount:
-                async with db.cursor() as cur:
-                    await cur.executemany(TIMELINE, [(*key, t, n) for t, n in timeline[key].items()])
+            if (await db.execute(PROGRESS, row | {"votes": votes[key], "offset": position})).rowcount:
+                async with db.cursor() as cur:  # only the seconds changed since the last write
+                    await cur.executemany(TIMELINE, [row | {"second": t, "votes": timeline[key][t]} for t in changed.pop(key, ())])
             if closed and position >= ends[tp]:
-                await producer.flush()
                 await db.execute(DONE, key)
 
 
@@ -57,32 +63,48 @@ async def main():
     for tp in PARTITIONS:
         consumer.seek(tp, found[tp].offset if found.get(tp) else ends[tp])
 
-    # STUB: per-poll state is never freed after the poll is final.
+    polls = await read_polls(db)
+    gone = set()  # final or deleted polls: never come back
     votes = defaultdict(int)  # (poll_id, partition) -> all votes
     seen = defaultdict(set)  # (poll_id, partition) -> voter_ids
     timeline = defaultdict(Counter)  # (poll_id, partition) -> {second from window_start: votes}
+    changed = defaultdict(set)  # (poll_id, partition) -> seconds of timeline not written yet
+    fresh = defaultdict(list)  # (poll_id, partition) -> received_at of votes since the last report
+    sent = []  # delivery futures of votes_by_ip since the last report
     last_report = 0.0
     while True:
-        batch = await consumer.getmany(timeout_ms=1000)
-        # read after the batch, so a vote accepted by ingest's stale cache after finish meets the new window_end
-        polls = {row[0]: row[1:] for row in await (await db.execute(POLLS, (DELIVERY_TIMEOUT_S,))).fetchall()}
-        for tp, messages in batch.items():
-            for m in messages:
-                v = decode(m.value)
-                if v.poll_id not in polls:  # final or deleted poll
-                    continue
-                window_start, window_end, _ = polls[v.poll_id]
-                if v.received_at_ms > window_end:  # after window_end + grace_s
-                    continue
-                key = (v.poll_id, tp.partition)
-                votes[key] += 1
-                timeline[key][int((v.received_at_ms - window_start) // 1000)] += 1
-                if v.voter_id not in seen[key]:
-                    seen[key].add(v.voter_id)
-                    await producer.send("votes_by_ip", m.value, key=v.ip_hmac)
+        batch = [(tp.partition, m.value, decode(m.value)) for tp, ms in (await consumer.getmany(timeout_ms=1000)).items() for m in ms]
+        if any(v.poll_id not in polls and v.poll_id not in gone for *_, v in batch):  # a newly activated poll
+            polls = await read_polls(db)
+            gone.update(v.poll_id for *_, v in batch if v.poll_id not in polls)
+        for partition, value, v in batch:
+            # window_end may be cached from before finish: votes are counted in the report, against polls read after them
+            if v.poll_id not in polls or v.received_at_ms > polls[v.poll_id][1]:  # final, deleted or late
+                continue
+            key = (v.poll_id, partition)
+            fresh[key].append(v.received_at_ms)
+            if v.voter_id not in seen[key]:  # a late vote after finish is dropped by stage 2 (it checks received_at)
+                seen[key].add(v.voter_id)
+                sent.append(await producer.send("votes_by_ip", value, key=v.ip_hmac))
         if time.monotonic() - last_report >= 1:
             last_report = time.monotonic()
-            await report(db, consumer, producer, polls, votes, timeline)
+            await asyncio.gather(*sent)  # raises on a failed delivery: the restart forwards again
+            sent.clear()
+            polls = await read_polls(db)  # after the batch, so a vote accepted by ingest's stale cache after finish meets the new window_end
+            for key, received in fresh.items():
+                if key[0] in polls:
+                    window_start, window_end, _ = polls[key[0]]
+                    for r in received:
+                        if r <= window_end:
+                            votes[key] += 1
+                            timeline[key][t := int((r - window_start) // 1000)] += 1
+                            changed[key].add(t)
+            fresh.clear()
+            for state in (votes, seen, timeline, changed):  # free polls that are final or deleted
+                for key in [key for key in state if key[0] not in polls]:
+                    gone.add(key[0])
+                    del state[key]
+            await report(db, consumer, polls, votes, timeline, changed)
 
 
 if __name__ == "__main__":

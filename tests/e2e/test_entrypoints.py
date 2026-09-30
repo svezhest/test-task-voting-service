@@ -35,10 +35,9 @@ def test_viewer_entry_serves_page_and_config(viewer, make_poll):
     assert r.json()["id"] == p["id"]
 
 
-def test_cf_connecting_ip_beats_xff(make_poll, vote, wait_final, admin):
-    # contracts.md: IP клиента — CF-Connecting-IP, если есть; X-Forwarded-For — только без него.
-    # Два voter_id, один fp, разные XFF, один CF-Connecting-IP → один ip_hmac:
-    # в ip_concentration один IP с 2 голосами, а не два IP по одному.
+def test_cf_connecting_ip_ignored_on_viewer_entry(make_poll, vote, wait_final, admin):
+    # contracts.md: CF-Connecting-IP принимается только из туннеля; на зрительском входе 8090 он сбрасывается.
+    # Два voter_id, один fp, разные XFF, один поддельный CF-Connecting-IP → два разных ip_hmac.
     p = make_poll(window_s=5)
     cf = {"CF-Connecting-IP": "203.0.113.77"}
     ok(vote(p["id"], [0], None, {"model": "cf"}, ip="198.51.100.11", headers=cf))
@@ -48,5 +47,4 @@ def test_cf_connecting_ip_beats_xff(make_poll, vote, wait_final, admin):
 
     a = admin.get(f"/admin/polls/{p['id']}/analytics", headers=AUTH).json()
     buckets = {b["bucket"]: (b["ips"], b["votes"]) for b in a["ip_concentration"]}
-    assert buckets["1"] == (0, 0), buckets
-    assert buckets["2-10"] == (1, 2), buckets
+    assert buckets["1"] == (2, 2), buckets

@@ -40,7 +40,7 @@ class PollIn(BaseModel):
     # STUB: question — docs say only "ISO 8601"; a time without a timezone is rejected with 422.
     window_start: AwareDatetime
     window_end: AwareDatetime
-    grace_s: int = Field(ge=0)
+    grace_s: int = Field(ge=0, le=86400)  # STUB: question — the upper bound (a day) is not in docs; above int32 it was a 500
 
     @model_validator(mode="after")
     def window(self):
@@ -107,6 +107,7 @@ def create_poll(poll: PollIn):
 @app.patch("/admin/polls/{poll_id}")
 def update_poll(poll_id: uuid.UUID, patch: dict):
     with db() as conn:
+        conn.execute("select from polls where id = %s for update", (poll_id,))  # parallel PATCHes do not lose changes
         poll = get_poll(conn, poll_id)
         if poll["status"] != "draft":
             raise HTTPException(409)
@@ -131,7 +132,9 @@ def activate_poll(poll_id: uuid.UUID):
         config = {k: poll[k] for k in ("id", "question", "type", "options", "window_start", "window_end", "grace_s")}
         path = Path(os.environ["WEB_ROOT"], "p", str(poll_id), "config.json")
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(jsonable_encoder(config), ensure_ascii=False))
+        tmp = path.with_name("config.json.tmp")  # atomic: nginx never serves a half-written file
+        tmp.write_text(json.dumps(jsonable_encoder(config), ensure_ascii=False))
+        os.replace(tmp, path)
         return poll
 
 
@@ -140,7 +143,7 @@ def activate_poll(poll_id: uuid.UUID):
 def finish_poll(poll_id: uuid.UUID):
     with db() as conn:
         return change(conn, poll_id, """update polls set window_end = now()
-                                         where id = %s and status = 'active' and window_start <= now() and now() < window_end
+                                         where id = %s and status = 'active' and window_start < now() and now() < window_end
                                      returning id""", (poll_id,))
 
 

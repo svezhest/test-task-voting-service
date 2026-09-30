@@ -8,7 +8,7 @@ import psycopg
 from aiokafka import AIOKafkaConsumer, TopicPartition
 from psycopg.types.json import Jsonb
 
-from app.dedup import estimate_people, ip_ceiling, key_limit, poisson_limit, repeat_budget
+from app.dedup import estimate_people_many, ip_ceiling, key_limit, poisson_limits, repeat_budget
 from app.record import decode
 
 PARTITIONS = 8
@@ -42,8 +42,10 @@ async def read_partition(consumer, p, poll_id, start_ms, end_ms):
         consumer.seek(tp, found.offset)
         while await consumer.position(tp) < end:
             for m in (await consumer.getmany(tp, timeout_ms=1000)).get(tp, []):
+                if m.offset >= end or m.value[1:17] != poll_id.bytes:  # cheap check before decode
+                    continue
                 v = decode(m.value)
-                if m.offset < end and v.poll_id == poll_id and v.received_at_ms <= end_ms and v.voter_id not in seen:
+                if v.received_at_ms <= end_ms and v.voter_id not in seen:
                     seen.add(v.voter_id)
                     votes.append(v)
     return votes, end
@@ -75,8 +77,9 @@ async def pass2(db, poll_id, parts, window_s):
         for v in votes:
             fps[v.ip_hmac].add(v.fp_hash)
             voters[v.ip_hmac, v.fp_hash] += 1
-        people = {ip: estimate_people(len(f), p_all) for ip, f in fps.items()}
-        limits = {key: key_limit(poisson_limit(people[key[0]] * share[key[1]]), n, r) for key, n in voters.items()}
+        people = dict(zip(fps, estimate_people_many(numpy.array([len(f) for f in fps.values()]), p_all)))
+        lam = numpy.array([people[ip] * share[f] for ip, f in voters])
+        limits = {key: key_limit(int(n), voters[key], r) for key, n in zip(voters, poisson_limits(lam))}
         on_key, on_ip = Counter(), Counter()
         rejected_key = rejected_ip = 0
         counted, total = Counter({-1: 0}), Counter({-1: 0})  # option_idx -1 = number of votes
@@ -90,7 +93,7 @@ async def pass2(db, poll_id, parts, window_s):
             on_key[key] += ok
             on_ip[v.ip_hmac] += ok
             # STUB: votes over the limit are not stored anywhere with a mark, only counted in total.
-            for idx in [-1] + [i for i in range(64) if v.options >> i & 1]:
+            for idx in [-1] + [i for i in range(v.options.bit_length()) if v.options >> i & 1]:
                 total[idx] += 1
                 counted[idx] += ok
         hist = {b: {"ips": 0, "votes": 0} for b in BUCKETS}
@@ -98,9 +101,10 @@ async def pass2(db, poll_id, parts, window_s):
             b = "1" if n == 1 else "2-10" if n <= 10 else "11-100" if n <= 100 else "101+"
             hist[b]["ips"] += 1
             hist[b]["votes"] += n
-        await db.execute(STATS, (poll_id, p, rejected_key, rejected_ip, Jsonb(hist), end))
-        for idx in total:
-            await db.execute(RESULT, (poll_id, p, idx, counted[idx], total[idx], end))
+        async with db.transaction():  # the final check below never sees a partition half-written
+            await db.execute(STATS, (poll_id, p, rejected_key, rejected_ip, Jsonb(hist), end))
+            for idx in total:
+                await db.execute(RESULT, (poll_id, p, idx, counted[idx], total[idx], end))
 
     await db.execute(
         """update polls set status = 'final'
@@ -130,6 +134,8 @@ async def main():
                   and (select count(*) from stage_progress where poll_id = polls.id and stage = 1 and done_at is not null) = %s""",
             (PARTITIONS, PARTITIONS),
         )).fetchall()
+        ids = {row[0] for row in ready}  # forget polls that are final (or gone)
+        waiting, done = {k: v for k, v in waiting.items() if k in ids}, done & ids
         # the barrier never blocks: pass 1 for every ready poll, pass 2 once fp_counts of all partitions are in
         for poll_id, start_ms, end_ms, window_s, barrier in ready:
             if poll_id in done:  # another worker writes the last results and sets final
