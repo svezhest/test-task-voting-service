@@ -12,7 +12,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from psycopg.rows import dict_row
-from pydantic import AwareDatetime, BaseModel, Field, ValidationError, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 
 def check_token(authorization: str = Header("")):
@@ -34,6 +34,7 @@ NonBlank = Annotated[str, Field(pattern=r"\S")]  # at least one non-whitespace c
 
 
 class PollIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # an unknown field (a typo, "status") is 422, not silently dropped
     question: NonBlank
     type: Literal["single", "multi"]
     options: list[NonBlank] = Field(min_length=2, max_length=64)
@@ -113,7 +114,7 @@ def update_poll(poll_id: uuid.UUID, patch: dict):
             raise HTTPException(409)
         poll["options"] = [o["label"] for o in poll["options"]]
         try:
-            new = PollIn(**(poll | patch))
+            new = PollIn(**({k: poll[k] for k in PollIn.model_fields} | patch))
         except ValidationError as e:
             raise RequestValidationError(e.errors(include_url=False))
         change(conn, poll_id, """update polls set question = %s, type = %s, window_start = %s, window_end = %s, grace_s = %s

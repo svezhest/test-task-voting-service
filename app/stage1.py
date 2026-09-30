@@ -8,7 +8,7 @@ from aiokafka import AIOKafkaConsumer, AIOKafkaProducer, TopicPartition
 
 from app.record import decode
 
-PARTITIONS = [TopicPartition("votes_raw", p) for p in range(8)]
+PARTITIONS = [TopicPartition("votes_raw", p) for p in range(8) if p % int(os.environ["STAGE1_WORKERS"]) == int(os.environ["STAGE1_WORKER_INDEX"])]
 DELIVERY_TIMEOUT_S = float(os.environ["DELIVERY_TIMEOUT_S"])
 
 # poll_id -> window_start, window_end + grace_s (ms), close_at passed
@@ -65,7 +65,7 @@ async def main():
         consumer.seek(tp, found[tp].offset if found.get(tp) else ends[tp])
 
     votes = defaultdict(int)  # (poll_id, partition) -> all votes
-    seen = defaultdict(set)  # (poll_id, partition) -> voter_ids
+    seen = defaultdict(set)  # (poll_id, partition) -> voter_ids as raw 16 bytes: less memory than uuid.UUID
     timeline = defaultdict(Counter)  # (poll_id, partition) -> {second from window_start: votes}
     changed = defaultdict(set)  # (poll_id, partition) -> seconds of timeline not written yet
     fresh = defaultdict(list)  # (poll_id, partition) -> received_at of votes since the last report
@@ -80,8 +80,9 @@ async def main():
                 continue
             key = (v.poll_id, partition)
             fresh[key].append(v.received_at_ms)
-            if v.voter_id not in seen[key]:  # a late vote after finish is dropped by stage 2 (it checks received_at)
-                seen[key].add(v.voter_id)
+            voter = value[-16:]  # voter_id: the last 16 bytes of the record (record.py)
+            if voter not in seen[key]:  # a late vote after finish is dropped by stage 2 (it checks received_at)
+                seen[key].add(voter)
                 sent.append(await producer.send("votes_by_ip", value, key=v.ip_hmac))
         if time.monotonic() - last_report >= 1:
             last_report = time.monotonic()

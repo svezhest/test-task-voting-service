@@ -8,6 +8,8 @@ x-app: &app
     TRUST_XFF: "1"
     DELIVERY_TIMEOUT_S: "3"
     WEB_ROOT: /srv/web
+    STAGE1_WORKERS: "1"
+    STAGE1_WORKER_INDEX: "0"
     STAGE2_WORKERS: "1"
     STAGE2_WORKER_INDEX: "0"
     HOST_LAN_IP: ${HOST_LAN_IP:-}
@@ -35,12 +37,12 @@ services:
 
   admin:
     <<: *app
-    command: uvicorn app.admin:app --host 0.0.0.0
+    command: uvicorn app.admin:app --host 0.0.0.0 --no-access-log
     volumes: [published:/srv/web]
 
   ingest:
     <<: *app
-    command: uvicorn app.ingest:app --host 0.0.0.0
+    command: uvicorn app.ingest:app --host 0.0.0.0 --no-access-log --log-level warning
     deploy: {replicas: 2}
 
   stage1:

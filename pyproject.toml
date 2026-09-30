@@ -5,6 +5,8 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi",
     "uvicorn",
+    "uvloop",
+    "httptools",
     "aiokafka[lz4]",
     "psycopg[binary]",
     "numpy",
