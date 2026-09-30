@@ -300,7 +300,7 @@ async function pollView(id, g) {
   main.innerHTML = `<a class="mono small muted" href="#/">← все опросы</a>
   <div class="head" style="margin-top:32px"><h1>${esc(p.question)}</h1><span id="st">${badge(p.status)}</span></div>
   ${draft ? '<p class="notice">Черновик: зрители его не видят, его можно менять. После запуска изменить или удалить опрос будет нельзя.</p>'
-    : final ? '' : '<p class="notice">Опрос запущен: изменить или удалить его нельзя до завершения.</p>'}
+    : final ? '' : '<p class="notice" id="notice"></p><div class="actions" id="finrow"><button class="ghost" id="fin">Завершить досрочно</button></div>'}
   ${draft ? `<div class="actions"><button id="act">Запустить</button>
     <a class="btn ghost" href="#/p/${esc(p.id)}/edit">Изменить</a><button class="ghost" id="del">Удалить</button></div>` : ''}
   ${final ? '' : shareHtml(url)}
@@ -314,6 +314,16 @@ async function pollView(id, g) {
     qr.make();
     $('#qr').innerHTML = qr.createSvgTag({ cellSize: 1, margin: 2, scalable: true, title: url });
     $('#copy').onclick = () => navigator.clipboard.writeText(url).then(() => toast('Ссылка скопирована.', true), () => toast('Не удалось скопировать ссылку.'));
+  }
+  if ($('#fin')) {
+    live(p, p.status);
+    $('#fin').onclick = async () => {
+      if (!await ask('Досрочное завершение', 'Голосование закончится сейчас. Зрители с отстающей трансляцией ещё успеют проголосовать в пределах задержки. Отменить нельзя. Завершить?', 'Завершить', 'danger')) return;
+      $('#fin').disabled = true;
+      try { await api('POST', `/polls/${p.id}/finish`); toast('Голосование завершено.', true); }
+      catch (e) { if (e.status === 401) return; toast(e.status === 409 ? 'Не удалось завершить: голосование уже закончилось.' : e.message); }
+      route();
+    };
   }
   if ($('#del')) $('#del').onclick = () => remove(p, $('#del'));
   if ($('#act')) $('#act').onclick = async () => {
@@ -330,6 +340,15 @@ async function pollView(id, g) {
   if (!draft) loop(p, g);
 }
 
+// Плашка и кнопка «Завершить досрочно» у запущенного опроса. finish принимается только внутри окна
+// (window_start ≤ сейчас < window_end), поэтому кнопку показываем только тогда.
+function live(p, status) {
+  if (!$('#notice')) return;
+  const now = Date.now(), can = status === 'active' && now >= new Date(p.window_start) && now < new Date(p.window_end);
+  $('#notice').textContent = 'Опрос запущен: изменить или удалить его нельзя' + (can ? ', но можно завершить досрочно.' : ' до завершения.');
+  $('#finrow').hidden = !can;
+}
+
 // ---------- аналитика: раз в секунду, пока не final ----------
 
 async function loop(p, g) {
@@ -341,6 +360,7 @@ async function loop(p, g) {
     // опрос завершился у нас на глазах: перерисовать карточку целиком — без ссылки, с кнопкой «Удалить»
     if (final && p.status !== 'final') return route();
     $('#st').innerHTML = badge(res.status);
+    live(p, res.status);
     $('#an').innerHTML = final ? finalHtml(res, an, p) : liveHtml(res, an, p);
   } catch (e) {
     if (e.status === 401 || g !== gen) return;
