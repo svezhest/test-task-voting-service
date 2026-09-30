@@ -40,9 +40,10 @@ async def report(db, consumer, polls, votes, timeline, changed):
             key = (poll_id, tp.partition)
             row = {"poll": poll_id, "part": tp.partition}
             # timeline only when progress moved forward: a restarted stage 1 does not roll the curve back
-            if (await db.execute(PROGRESS, row | {"votes": votes[key], "offset": position})).rowcount:
-                async with db.cursor() as cur:  # only the seconds changed since the last write
-                    await cur.executemany(TIMELINE, [row | {"second": t, "votes": timeline[key][t]} for t in changed.pop(key, ())])
+            async with db.transaction():
+                if (await db.execute(PROGRESS, row | {"votes": votes[key], "offset": position})).rowcount:
+                    async with db.cursor() as cur:  # only the seconds changed since the last write
+                        await cur.executemany(TIMELINE, [row | {"second": t, "votes": timeline[key][t]} for t in changed.pop(key, ())])
             if closed and position >= ends[tp]:
                 await db.execute(DONE, key)
 
@@ -63,8 +64,6 @@ async def main():
     for tp in PARTITIONS:
         consumer.seek(tp, found[tp].offset if found.get(tp) else ends[tp])
 
-    polls = await read_polls(db)
-    gone = set()  # final or deleted polls: never come back
     votes = defaultdict(int)  # (poll_id, partition) -> all votes
     seen = defaultdict(set)  # (poll_id, partition) -> voter_ids
     timeline = defaultdict(Counter)  # (poll_id, partition) -> {second from window_start: votes}
@@ -74,9 +73,7 @@ async def main():
     last_report = 0.0
     while True:
         batch = [(tp.partition, m.value, decode(m.value)) for tp, ms in (await consumer.getmany(timeout_ms=1000)).items() for m in ms]
-        if any(v.poll_id not in polls and v.poll_id not in gone for *_, v in batch):  # a newly activated poll
-            polls = await read_polls(db)
-            gone.update(v.poll_id for *_, v in batch if v.poll_id not in polls)
+        polls = await read_polls(db)  # after the batch: the first vote of a voter_id is picked against fresh polls
         for partition, value, v in batch:
             # window_end may be cached from before finish: votes are counted in the report, against polls read after them
             if v.poll_id not in polls or v.received_at_ms > polls[v.poll_id][1]:  # final, deleted or late
@@ -102,7 +99,6 @@ async def main():
             fresh.clear()
             for state in (votes, seen, timeline, changed):  # free polls that are final or deleted
                 for key in [key for key in state if key[0] not in polls]:
-                    gone.add(key[0])
                     del state[key]
             await report(db, consumer, polls, votes, timeline, changed)
 

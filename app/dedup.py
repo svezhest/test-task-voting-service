@@ -5,10 +5,12 @@ from scipy.optimize import brentq
 from scipy.stats import poisson
 
 
+# STUB: simplification — docs suggest a precomputed table over a λ grid; we call scipy directly (exact, slower).
 def poisson_limit(lam: float) -> int:
     return 1 + int(poisson.ppf(0.9999, lam))
 
 
+# STUB: simplification — the same: scipy directly instead of a precomputed table over a λ grid.
 def poisson_limits(lam: numpy.ndarray) -> numpy.ndarray:  # poisson_limit for all keys at once
     return 1 + poisson.ppf(0.9999, lam).astype(numpy.int64)
 

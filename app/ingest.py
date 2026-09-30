@@ -24,7 +24,7 @@ producer: AIOKafkaProducer
 db = None  # one connection to Postgres for all reloads
 lock = asyncio.Lock()
 reload = None  # the reload shared by all cache misses
-reload_at = 0.0
+reload_at = 0.0  # when the latest miss reload starts loading (monotonic)
 unknown = {}  # poll_id -> until when a miss does not reload (monotonic): random poll_ids must not load Postgres
 
 
@@ -36,17 +36,18 @@ async def load_polls():
     async with lock:
         try:
             if db is None or db.closed:
-                db = await psycopg.AsyncConnection.connect(os.environ["DATABASE_URL"], autocommit=True)
-            cur = await db.execute(
+                db = await psycopg.AsyncConnection.connect(os.environ["DATABASE_URL"], autocommit=True, connect_timeout=2)
+            cur = await asyncio.wait_for(db.execute(  # a silently dead connection must not hold the lock for minutes
                 """select p.id, p.type, p.salt, extract(epoch from p.window_start)::float8,
                           extract(epoch from p.window_end)::float8 + p.grace_s, array_agg(o.idx)
                      from polls p join options o on o.poll_id = p.id
                     where p.status <> 'draft' and p.window_end + make_interval(secs => p.grace_s) > now() - interval '1 day'
                     group by p.id"""
-            )
+            ), 2)
             polls = {row[0]: row[1:] for row in await cur.fetchall()}
-        except psycopg.Error as e:  # Postgres is down: keep working on the last polls
-            print("polls refresh failed:", e, flush=True)
+        except (psycopg.Error, TimeoutError) as e:  # Postgres is down: keep working on the last polls
+            print("polls refresh failed:", repr(e), flush=True)
+            db = None  # the next load opens a new connection
 
 
 async def refresh_polls():
@@ -57,10 +58,8 @@ async def refresh_polls():
         await asyncio.sleep(1)
 
 
-async def reload_after_miss():  # at most every 200 ms
-    global reload_at
-    await asyncio.sleep(reload_at + 0.2 - time.monotonic())
-    reload_at = time.monotonic()
+async def reload_after_miss(at):
+    await asyncio.sleep(at - time.monotonic())
     await load_polls()
 
 
@@ -97,7 +96,8 @@ class VoteIn(BaseModel):
 
 @app.post("/api/vote", status_code=204)
 async def vote(body: VoteIn, request: Request):
-    global reload
+    global reload, reload_at
+    arrived = time.monotonic()
     xff = request.headers.get("x-forwarded-for")
     raw = request.headers.get("cf-connecting-ip") or (xff.split(",")[0] if TRUST_XFF and xff else request.client.host)
     try:
@@ -106,8 +106,9 @@ async def vote(body: VoteIn, request: Request):
         return Response(status_code=400)
     ip = getattr(ip, "ipv4_mapped", None) or ip  # ::ffff:a.b.c.d -> a.b.c.d
     if body.poll_id not in polls and unknown.get(body.poll_id, 0) < time.monotonic():  # activated less than a second ago?
-        if reload is None or reload.done():
-            reload = asyncio.create_task(reload_after_miss())
+        if reload_at < arrived:  # join only a reload that starts loading after this request came
+            reload_at = max(reload_at + 0.2, arrived)  # at most every 200 ms
+            reload = asyncio.create_task(reload_after_miss(reload_at))
         await asyncio.shield(reload)  # a client that hangs up does not cancel it for the others
         if body.poll_id not in polls:
             unknown[body.poll_id] = time.monotonic() + 1
