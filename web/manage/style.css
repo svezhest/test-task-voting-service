@@ -124,9 +124,11 @@ svg .hit:hover { fill: var(--fg); fill-opacity: .06; }
 .funnel { display: grid; grid-template-columns: minmax(140px, 220px) 1fr 130px; align-items: center; }
 .funnel > div:not(.cone) { padding: 0 24px 0 0; }
 .cone { height: 56px; display: flex; justify-content: center; }
-.cone .fill { background: var(--accent-soft); }
-.funnel .cone:nth-child(8) .fill { background: var(--accent); }
-.funnel .val, .why .val { font-family: var(--mono); text-align: right; padding: 0; }
+.cone .fill { background: var(--accent); opacity: .3; }
+.funnel .cone:nth-child(5) .fill { opacity: .55; }
+.funnel .cone:nth-child(8) .fill { opacity: 1; }
+.funnel .val, .why .val { font-family: var(--mono); text-align: right; }
+.funnel .val { padding: 0; }
 .why { display: grid; grid-template-columns: 1fr 130px; margin-top: 40px; font-size: 14px; color: var(--muted); }
 .why > div { padding: 14px 0; border-bottom: 1px solid var(--line); }
 .why > div:nth-child(-n+2) { border-top: 1px solid var(--line); }

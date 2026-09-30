@@ -270,7 +270,7 @@ function finalHtml(res, an, p) {
     <div class="kpi"><div class="mid">${pct(res.over_limit_share)}</div><div class="muted">отсеяно как подозрительные</div></div>
   </div>
   <h2>Итоги</h2>
-  ${p.type === 'multi' ? '<p class="muted small note top">Зрители могли выбрать несколько вариантов, поэтому в сумме больше 100%.</p>' : ''}
+  ${p.type === 'multi' ? '<p class="muted small note top">Зрители могли выбрать несколько вариантов, поэтому в сумме может быть больше 100%.</p>' : ''}
   <div class="bars">${res.options.map(o => `<div>
     <div class="bar-top"><span>${esc(o.label)}</span><span class="mono">${pct(o.share)}</span></div>
     ${bar(o.share || 0, 1)}
