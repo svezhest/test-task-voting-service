@@ -2,6 +2,7 @@ import datetime as dt
 import sys
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import httpx
@@ -31,10 +32,48 @@ def _connect(base, probe, ok_codes):
     return c
 
 
+CREATED = []  # id опросов, созданных тестами за сессию: в конце их удаляет _cleanup
+
+
+def _track(r):
+    if r.request.method == "POST" and r.request.url.path == "/admin/polls" and r.status_code == 201:
+        r.read()
+        CREATED.append(r.json()["id"])
+
+
+def _cleanup(c, pid, deadline):
+    # DELETE можно только в draft/final; active — finish (как только идёт окно), counting — ждать final.
+    while time.time() < deadline:
+        r = c.get(f"/admin/polls/{pid}", headers=AUTH)
+        if r.status_code == 404:
+            return
+        p = r.json()
+        if p["status"] in ("draft", "final"):
+            if c.delete(f"/admin/polls/{pid}", headers=AUTH).status_code in (204, 404):
+                return
+        elif p["status"] == "active":
+            now = time.time()
+            start = dt.datetime.fromisoformat(p["window_start"]).timestamp()
+            if start > deadline:
+                raise RuntimeError(f"окно начнётся через {start - now:.0f} с")
+            if start < now < dt.datetime.fromisoformat(p["window_end"]).timestamp():
+                c.post(f"/admin/polls/{pid}/finish", headers=AUTH)
+        time.sleep(0.5)
+    raise TimeoutError(f"не дошёл до удаления, статус {p['status']}")
+
+
 @pytest.fixture(scope="session")
-def admin():
+def admin(request):
     c = _connect(ADMIN, "/admin/polls", {200})
+    c.event_hooks["response"] = [_track]
     yield c
+    t0 = time.time()
+    with ThreadPoolExecutor(32) as ex:
+        futs = {pid: ex.submit(_cleanup, c, pid, t0 + 120) for pid in set(CREATED)}
+    errors = [f"  {pid}: {f.exception()!r}" for pid, f in futs.items() if f.exception()]
+    with request.config.pluginmanager.get_plugin("capturemanager").global_and_fixture_disabled():
+        print(f"\nочистка: {len(futs)} опросов за {time.time() - t0:.1f} с, не удалено {len(errors)}",
+              *errors, sep="\n")
     c.close()
 
 
