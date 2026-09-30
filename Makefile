@@ -15,3 +15,6 @@ test:
 
 down:
 	docker compose down -v
+
+populate:
+	uv run python scripts/populate.py
