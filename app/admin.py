@@ -1,9 +1,10 @@
 import json
 import os
+import shutil
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 import psycopg
 from fastapi import Depends, FastAPI, Header, HTTPException
@@ -20,10 +21,13 @@ def check_token(authorization: str = Header("")):
 app = FastAPI(dependencies=[Depends(check_token)])
 
 
+NonBlank = Annotated[str, Field(pattern=r"\S")]  # at least one non-whitespace character
+
+
 class PollIn(BaseModel):
-    question: str
+    question: NonBlank
     type: Literal["single", "multi"]
-    options: list[str] = Field(min_length=2, max_length=64)
+    options: list[NonBlank] = Field(min_length=2, max_length=64)
     # STUB: question — docs say only "ISO 8601"; a time without a timezone is rejected with 422.
     window_start: AwareDatetime
     window_end: AwareDatetime
@@ -120,6 +124,17 @@ def activate_poll(poll_id: uuid.UUID):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(jsonable_encoder(config), ensure_ascii=False))
         return poll | {"status": "active"}
+
+
+@app.delete("/admin/polls/{poll_id}", status_code=204)
+def delete_poll(poll_id: uuid.UUID):
+    with db() as conn:
+        get_poll(conn, poll_id)
+        for table in ("options", "results", "stage_progress", "fp_counts", "timeline", "stage2_stats"):
+            conn.execute(f"delete from {table} where poll_id = %s", (poll_id,))
+        if conn.execute("delete from polls where id = %s and status in ('draft', 'final')", (poll_id,)).rowcount == 0:
+            raise HTTPException(409)  # rolls back the deletes above
+    shutil.rmtree(Path(os.environ["WEB_ROOT"], "p", str(poll_id)), ignore_errors=True)
 
 
 @app.get("/admin/polls")

@@ -68,12 +68,15 @@ async def main():
         for tp, messages in (await consumer.getmany(timeout_ms=1000)).items():
             for m in messages:
                 v = decode(m.value)
+                if v.poll_id not in starts:
+                    row = await (await db.execute(
+                        "select extract(epoch from window_start)::float8 * 1000 from polls where id = %s", (v.poll_id,)
+                    )).fetchone()
+                    starts[v.poll_id] = row and row[0]
+                if starts[v.poll_id] is None:  # deleted poll: its raw votes stay in Kafka until retention
+                    continue
                 key = (v.poll_id, tp.partition)
                 votes[key] += 1
-                if v.poll_id not in starts:
-                    starts[v.poll_id] = (await (await db.execute(
-                        "select extract(epoch from window_start)::float8 * 1000 from polls where id = %s", (v.poll_id,)
-                    )).fetchone())[0]
                 timeline[key][int((v.received_at_ms - starts[v.poll_id]) // 1000)] += 1
                 if v.voter_id not in seen[key]:
                     seen[key].add(v.voter_id)
