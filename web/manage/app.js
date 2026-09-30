@@ -151,18 +151,114 @@ window.addEventListener('hashchange', route);
 
 // ---------- список ----------
 
+const plural = (n, one, few, many) => n % 10 === 1 && n % 100 !== 11 ? one : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? few : many;
+const polls_ = n => `${num(n)} ${plural(n, 'опрос', 'опроса', 'опросов')}`;
+const dayKey = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;   // местная дата «2026-09-30»
+const startKey = p => dayKey(new Date(p.window_start));
+const MON = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+const dayName = k => { const [y, m, d] = k.split('-').map(Number); return new Date(y, m - 1, d).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' }) + ' ' + y; };
+const monName = k => { const [y, m] = k.split('-').map(Number); return new Date(y, m - 1).toLocaleDateString('ru-RU', { month: 'long' }) + ' ' + y; };
+// подсветка совпадений: текст экранируем по кусочкам
+const hl = (s, q) => {
+  if (!q) return esc(s);
+  let out = '', i = 0, j;
+  while ((j = s.toLowerCase().indexOf(q, i)) >= 0) { out += esc(s.slice(i, j)) + '<mark>' + esc(s.slice(j, j + q.length)) + '</mark>'; i = j + q.length; }
+  return out + esc(s.slice(i));
+};
+
+let pick = '', query = '';   // фильтр списка: день «2026-09-30» или месяц «2026-09»; текст поиска — живут, пока открыта вкладка
+
 async function listView(g) {
   main.innerHTML = '<p class="muted mono">загрузка…</p>';
   const polls = await api('GET', '/polls');
   if (g !== gen) return;
-  main.innerHTML = `<div class="head"><h1>Опросы</h1><a class="btn" href="#/new">Новый опрос</a></div>` + (polls.length
-    ? `<table class="list"><thead><tr><th>Вопрос</th><th>Статус</th><th>Начало</th></tr></thead><tbody>
-      ${polls.map(p => `<tr data-id="${esc(p.id)}">
-        <td><a href="#/p/${esc(p.id)}">${esc(p.question) || '<span class="muted">без вопроса</span>'}</a></td>
-        <td>${badge(p.status)}</td>
-        <td class="mono small muted">${when(p.window_start)}</td></tr>`).join('')}
-      </tbody></table>`
-    : '<p class="muted">Опросов пока нет.</p>');
+  main.innerHTML = `<div class="head"><h1>Опросы</h1><a class="btn" href="#/new">Новый опрос</a></div>
+    ${calendar(polls)}
+    ${polls.length ? `<div class="filter"><p id="sum" class="mono"></p><button id="reset">Сбросить фильтры</button></div>
+    <input id="q" placeholder="Поиск по вопросам и вариантам" autocomplete="off" enterkeyhint="search">
+    <div id="rows"></div>` : '<p class="muted">Опросов пока нет.</p>'}`;
+  const sc = $('.cal-scroll');
+  sc.scrollLeft = sc.scrollWidth;   // на узком экране — сразу к последним неделям
+  // подсказка над днём: дата и число опросов
+  const tip = $('#tip'), inner = $('.cal-in');
+  inner.onmouseover = e => {
+    const c = e.target.dataset.d && e.target;
+    tip.hidden = !c;
+    if (!c) return;
+    tip.textContent = c.dataset.t;
+    const x = c.offsetLeft + c.offsetWidth / 2, w = tip.offsetWidth;
+    tip.style.left = Math.min(Math.max(x, w / 2), inner.offsetWidth - w / 2) + 'px';
+    tip.style.top = c.offsetTop + 'px';
+  };
+  inner.onmouseleave = () => tip.hidden = true;
+  if (!polls.length) return;
+  // повторный клик по тому же дню или месяцу — сброс
+  inner.onclick = e => { const k = e.target.closest('[data-d], [data-m]'); if (k) { const v = k.dataset.d || k.dataset.m; pick = pick === v ? '' : v; apply(polls); } };
+  $('#q').value = query;
+  $('#q').oninput = () => { query = $('#q').value; apply(polls); };
+  $('#reset').onclick = () => { pick = query = ''; $('#q').value = ''; apply(polls); };
+  apply(polls);
+}
+
+// Календарь как у GitHub: колонки — недели с понедельника, строки — дни; последние 12 месяцев до конца текущей недели.
+function calendar(polls) {
+  const n = {}, live = {};
+  for (const p of polls) {
+    const k = startKey(p), m = k.slice(0, 7);
+    n[k] = (n[k] || 0) + 1; n[m] = (n[m] || 0) + 1;
+    if (p.status === 'active') live[k] = live[m] = true;
+  }
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const d = new Date(today); d.setDate(d.getDate() - 364); d.setDate(d.getDate() - (d.getDay() + 6) % 7);
+  const end = new Date(today); end.setDate(end.getDate() + 6 - (today.getDay() + 6) % 7);
+  const keys = Object.keys(n), max = k => Math.max(1, ...keys.filter(x => x.length === k).map(x => n[x]));
+  const dmax = max(10), mmax = max(7);
+  // насыщенность 0–4 по логарифму: один опрос в день заметен и рядом с днём, где их сотня
+  const lvl = (c, top) => c ? Math.ceil(4 * Math.log1p(c) / Math.log1p(top)) : 0;
+  let days = '', year = 0;
+  const heads = [];
+  while (d <= end) {
+    for (let i = 0; i < 7; i++, d.setDate(d.getDate() + 1)) {
+      const k = dayKey(d), c = n[k] || 0;
+      if (d <= today) year += c;
+      days += `<i data-d="${k}" data-t="${dayName(k)} · ${c ? polls_(c) : 'опросов нет'}" class="l${lvl(c, dmax)}${live[k] ? ' live' : ''}${d > today && !c ? ' later' : ''}"></i>`;
+    }
+    // неделя относится к месяцу своего воскресенья: подпись месяца встаёт над неделей с его первым числом;
+    // у месяца в одну неделю подписи нет — кроме текущего, его подпись заходит за край
+    const m = dayKey(new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1)).slice(0, 7);
+    if (heads.length && heads.at(-1).m === m) heads.at(-1).span++; else heads.push({ m, span: 1 });
+  }
+  const liveNow = polls.filter(p => p.status === 'active').length;
+  return `<section class="cal">
+    <div class="cal-top"><p class="mono"><b>${polls_(year)}</b> за год${liveNow ? ` · <span class="go">${num(liveNow)} ${plural(liveNow, 'идёт', 'идут', 'идут')} сейчас</span>` : ''}</p>
+      <p class="scale mono small muted">меньше${[0, 1, 2, 3, 4].map(l => `<i class="l${l}"></i>`).join('')}больше</p></div>
+    <div class="cal-scroll"><div class="cal-in">
+      <div class="months"><span></span>${heads.map((h, i) => h.span < 2 && i < heads.length - 1 ? `<span style="grid-column:span ${h.span}"></span>`
+        : `<button class="mon" data-m="${h.m}" style="grid-column:span ${h.span}" title="${monName(h.m)} · ${n[h.m] ? polls_(n[h.m]) : 'опросов нет'}"><i class="l${lvl(n[h.m] || 0, mmax)}${live[h.m] ? ' live' : ''}"></i>${MON[+h.m.slice(5) - 1]}</button>`).join('')}</div>
+      <div class="days"><span></span><span>пн</span><span></span><span>ср</span><span></span><span>пт</span><span></span>${days}</div>
+      <div id="tip" class="tip mono" hidden></div>
+    </div></div></section>`;
+}
+
+function apply(polls) {
+  const q = query.trim().toLowerCase(), has = s => s.toLowerCase().includes(q);
+  const shown = polls.filter(p => startKey(p).startsWith(pick) && (!q || has(p.question) || p.options.some(o => has(o.label))));
+  main.querySelectorAll('.cal [data-d]').forEach(c => { c.classList.toggle('dim', !!pick && !c.dataset.d.startsWith(pick)); c.classList.toggle('sel', c.dataset.d === pick); });
+  main.querySelectorAll('.mon').forEach(b => b.classList.toggle('sel', b.dataset.m === pick));
+  const where = (pick ? (pick.length > 7 ? 'За ' + dayName(pick) : 'За ' + monName(pick)) : '') + (q ? (pick ? ' по' : 'По') + ` запросу «${esc(query.trim())}»` : '');
+  $('#sum').innerHTML = where ? `${where}: <b>${polls_(shown.length)}</b>` : `Все опросы: <b>${num(polls.length)}</b>`;
+  $('#reset').hidden = !where;
+  $('#rows').innerHTML = shown.length ? `<table class="list"><thead><tr><th>Вопрос</th><th>Статус</th><th>Начало</th></tr></thead><tbody>
+    ${shown.map(p => {
+      // при поиске под вопросом — только подходящие варианты, иначе все
+      const opts = q && p.options.some(o => has(o.label)) ? p.options.filter(o => has(o.label)) : p.options;
+      return `<tr data-id="${esc(p.id)}">
+      <td><a href="#/p/${esc(p.id)}">${hl(p.question, q) || '<span class="muted">без вопроса</span>'}</a>
+        <div class="opts">${opts.map(o => hl(o.label, q)).join('<span> · </span>')}</div></td>
+      <td>${badge(p.status)}</td>
+      <td class="mono small muted">${when(p.window_start)}</td></tr>`;
+    }).join('')}</tbody></table>`
+    : '<div class="empty"><p>Ничего не нашлось.</p><p class="muted small">Попробуйте другое слово или сбросьте фильтры.</p></div>';
   main.querySelectorAll('tr[data-id]').forEach(tr => tr.onclick = () => location.hash = '#/p/' + tr.dataset.id);
 }
 
@@ -195,7 +291,8 @@ function formView(p) {
       <label><span>Задержка, секунд</span><input type="number" name="grace" value="${p ? p.grace_s : 60}"></label>
     </div>
     <p class="muted small hint">Время местное, по часам этого компьютера (${zone(start)}).
-      Задержка — сколько секунд после конца ещё принимать голоса: у части зрителей трансляция отстаёт.</p></fieldset>
+      Задержка — сколько секунд после конца ещё принимать голоса: у части зрителей трансляция отстаёт.</p>
+    ${/^(Etc\/)?UTC$/.test(Intl.DateTimeFormat().resolvedOptions().timeZone) ? '<p class="muted tz">ваш браузер скрывает часовой пояс — время показано по UTC</p>' : ''}</fieldset>
     <div class="actions">
       <button>${p ? 'Сохранить' : 'Создать черновик'}</button>
       <a class="btn ghost" href="${p ? '#/p/' + esc(p.id) : '#/'}">Отмена</a>
@@ -286,16 +383,33 @@ const optList = p => `<h2>Варианты ответа</h2>
   <ol class="optlist">${p.options.map(o => `<li><span class="mono">${o.idx + 1}</span>${esc(o.label)}</li>`).join('')}</ol>`;
 
 // Ссылка и QR для зрителей — только пока опрос не завершён.
-const shareHtml = url => `<section class="share"><div class="qr" id="qr"></div>
-  <div><span class="label">Ссылка для зрителей</span><code>${esc(url)}</code>
-    <a class="btn ghost" href="${esc(url)}" target="_blank">Открыть</a>
+const shareHtml = pub => `<section class="share"><div class="qr" id="qr"></div>
+  <div><span class="label">Ссылка для зрителей</span>
+    ${pub.tunnel && pub.lan ? '<div class="via mono small"><button class="link" data-via="tunnel">через интернет</button><button class="link" data-via="lan">в локальной сети</button></div>' : ''}
+    <code id="url"></code><p class="muted small" id="where"></p>
+    <a class="btn ghost" id="open" target="_blank">Открыть</a>
     <button class="ghost" id="copy">Скопировать</button>
     <p class="muted small">Покажите QR-код в эфире — зрители наведут камеру телефона и попадут на страницу голосования.</p></div></section>`;
 
+// Адрес для телефона: туннель, если есть, иначе адрес в локальной сети, иначе адрес этой страницы.
+function share(pub, via, id) {
+  const url = `${pub[via] || location.origin}/p/${id}`;
+  $('#url').textContent = url;
+  $('#open').href = url;
+  $('#where').textContent = pub[via] ? (via === 'tunnel' ? 'Откроется с любого телефона.' : 'Телефон должен быть в той же Wi-Fi, что и этот компьютер.') : '';
+  $('#where').hidden = !pub[via];
+  document.querySelectorAll('[data-via]').forEach(b => { b.classList.toggle('on', b.dataset.via === via); b.onclick = () => share(pub, b.dataset.via, id); });
+  // QR ссылки: qrcode-generator (vendor/qrcode.js), тип подбирается сам, коррекция M; тихую зону добирает светлая рамка.
+  const qr = qrcode(0, 'M');
+  qr.addData(url);
+  qr.make();
+  $('#qr').innerHTML = qr.createSvgTag({ cellSize: 1, margin: 2, scalable: true, title: url });
+  $('#copy').onclick = () => navigator.clipboard.writeText(url).then(() => toast('Ссылка скопирована.', true), () => toast('Не удалось скопировать ссылку.'));
+}
+
 async function pollView(id, g) {
-  const p = await api('GET', '/polls/' + id);
+  const [p, pub] = await Promise.all([api('GET', '/polls/' + id), api('GET', '/public-url').catch(() => ({}))]);
   if (g !== gen) return;
-  const url = `${location.origin}/p/${p.id}`;
   const draft = p.status === 'draft', final = p.status === 'final';
   main.innerHTML = `<a class="mono small muted" href="#/">← все опросы</a>
   <div class="head" style="margin-top:32px"><h1>${esc(p.question)}</h1><span id="st">${badge(p.status)}</span></div>
@@ -303,18 +417,11 @@ async function pollView(id, g) {
     : final ? '' : '<p class="notice" id="notice"></p><div class="actions" id="finrow"><button class="ghost" id="fin">Завершить досрочно</button></div>'}
   ${draft ? `<div class="actions"><button id="act">Запустить</button>
     <a class="btn ghost" href="#/p/${esc(p.id)}/edit">Изменить</a><button class="ghost" id="del">Удалить</button></div>` : ''}
-  ${final ? '' : shareHtml(url)}
+  ${final ? '' : shareHtml(pub)}
   <section id="an">${draft ? optList(p) : '<p class="muted mono">загрузка…</p>'}</section>
   ${final ? '<div class="del-row"><button class="ghost" id="del">Удалить опрос</button></div>' : ''}
   <p class="tech">${TYPE[p.type] || esc(p.type)} · начало ${dt(p.window_start)} · конец ${dt(p.window_end)} · задержка ${p.grace_s} с · номер ${esc(p.id)}</p>`;
-  if (!final) {
-    // QR ссылки: qrcode-generator (vendor/qrcode.js), тип подбирается сам, коррекция M; тихую зону добирает светлая рамка.
-    const qr = qrcode(0, 'M');
-    qr.addData(url);
-    qr.make();
-    $('#qr').innerHTML = qr.createSvgTag({ cellSize: 1, margin: 2, scalable: true, title: url });
-    $('#copy').onclick = () => navigator.clipboard.writeText(url).then(() => toast('Ссылка скопирована.', true), () => toast('Не удалось скопировать ссылку.'));
-  }
+  if (!final) share(pub, pub.tunnel ? 'tunnel' : 'lan', p.id);
   if ($('#fin')) {
     live(p, p.status);
     $('#fin').onclick = async () => {
@@ -424,7 +531,8 @@ function chart(an, p) {
   const n = Math.max(tl.length, Math.ceil(win + p.grace_s), 1);
   const total = tl.reduce((s, x) => s + x.received, 0);
   const model = m ? Array.from({ length: n }, (_, t) => total * (cdf(t + 1, m) - cdf(t, m))) : [];
-  const max = Math.max(1, ...tl.map(x => x.received), ...model);
+  // без «...»: у длинного окна сотни тысяч секунд, столько аргументов Math.max не примет
+  const max = [...tl.map(x => x.received), ...model].reduce((a, v) => Math.max(a, v), 1);
   const ys = nice(max / 4), top = Math.ceil(max / ys) * ys, xs = nice(n / Math.max(3, W / 110));
   const bw = (W - L - R) / n;
   const x = t => L + t * bw, y = v => T + (1 - v / top) * (H - T - B);
