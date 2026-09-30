@@ -32,6 +32,12 @@ docker-compose.yml, Makefile, pyproject.toml
 - `/admin/` → API админки;
 - `/manage/` → страница админки (`web/manage/`); токен вводится на странице и хранится в localStorage.
 
+Публичный адрес для телефона:
+- по умолчанию — Cloudflare quick tunnel: сервис `cloudflared` в compose (`tunnel --url http://nginx:80`, метрики на `:2000`); админка узнаёт адрес из `http://cloudflared:2000/quicktunnel`;
+- запасной — адрес в локальной сети: `make up` определяет IP компьютера (`ipconfig getifaddr en0` на macOS, `hostname -I` на Linux) и передаёт его админке в `HOST_LAN_IP`;
+- `make up` в конце печатает ссылки на админку: через туннель и в локальной сети;
+- страница голосования работает и по `http://` в локальной сети: `voter_id` генерируется через `crypto.getRandomValues`, если `crypto.randomUUID` недоступен.
+
 nginx отдаёт статику с `Cache-Control: no-cache`. Повторный `make up` без `make down` работает (создание топиков идемпотентно).
 
 Kafka (Redpanda): топики `votes_raw` и `votes_by_ip`, по 8 партиций, создаются при старте стенда.
