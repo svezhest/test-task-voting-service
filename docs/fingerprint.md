@@ -33,9 +33,11 @@
 | Хэш canvas 2D | Только Chromium без Brave | Safari, Firefox, Brave, RFP: не брать |
 | Audio (`OfflineAudioContext`) | Только Chrome | Остальные: не брать |
 | Шрифты | Chrome; Firefox — только системные | Brave: не брать |
-| Медиазапросы: `reduced-motion`, `contrast`, `inverted-colors`, `forced-colors`, `reduced-transparency` | Везде | `prefers-color-scheme` не брать: тема может переключаться по расписанию |
+| Медиазапросы: `prefers-color-scheme`, `reduced-motion`, `contrast`, `inverted-colors`, `forced-colors`, `reduced-transparency` | Везде | Тема — решение автора, см. ниже |
 | Размер шрифта iOS (`-apple-system-body`) | Safari | Стабильность не проверена |
 | Тип защиты: нет / RFP-заглушка / Brave / расширение | Только эти классы | Для Safari и Firefox не брать: там тип защиты выдаёт режим |
+
+**Решение автора: тема (`prefers-color-scheme`) входит в отпечаток.** Она добавляет до 1 бита. Риск в том, что тема может переключиться по расписанию, но за окно в 1–2 минуты это почти невероятно. Если переключение всё же случится, честный человек не пострадает: он голосует один раз, и новый ключ ему ничем не мешает. Ручная смена темы накрутчиком уже учтена в известных ограничениях.
 
 **Не брать никогда:** квоту storage, наличие cookie и storage, размеры окна, координаты окна, тайминги, `navigator.connection`, батарею.
 
