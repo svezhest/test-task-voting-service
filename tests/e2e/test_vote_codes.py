@@ -19,9 +19,9 @@ def test_204_repeat_is_same(poll, vote):
     assert vote(poll["id"], [1], voter).status_code == 204
 
 
-def test_400_no_voter_id(client, poll):
+def test_400_no_voter_id(viewer, poll):
     body = {"poll_id": poll["id"], "options": [0], "fp": {}}
-    assert client.post("/api/vote", json=body).status_code == 400
+    assert viewer.post("/api/vote", json=body).status_code == 400
 
 
 @pytest.mark.parametrize("voter_id", ["not-a-uuid", "", 123])
@@ -29,19 +29,19 @@ def test_400_bad_voter_id(poll, vote, voter_id):
     assert vote(poll["id"], [0], voter_id=voter_id).status_code == 400
 
 
-def test_400_not_json(client):
-    r = client.post("/api/vote", content=b"{oops", headers={"Content-Type": "application/json"})
+def test_400_not_json(viewer):
+    r = viewer.post("/api/vote", content=b"{oops", headers={"Content-Type": "application/json"})
     assert r.status_code == 400
 
 
 @pytest.mark.parametrize("field", ["poll_id", "options", "voter_id", "fp"])
-def test_400_missing_field(client, poll, field):
+def test_400_missing_field(viewer, poll, field):
     body = {"poll_id": poll["id"], "options": [0], "voter_id": str(uuid.uuid4()), "fp": {}}
     del body[field]
-    assert client.post("/api/vote", json=body).status_code == 400
+    assert viewer.post("/api/vote", json=body).status_code == 400
 
 
-def test_404_unknown_poll(client, vote):
+def test_404_unknown_poll(viewer, vote):
     assert vote(uuid.uuid4(), [0]).status_code == 404
 
 
@@ -91,7 +91,15 @@ def test_410_after_final(make_poll, vote, wait_final):
     ("options", 0), ("options", "0"),
     ("poll_id", "not-a-uuid"), ("poll_id", 123),
 ])
-def test_400_bad_types(client, poll, field, value):
+def test_400_bad_types(viewer, poll, field, value):
     body = {"poll_id": poll["id"], "options": [0], "voter_id": str(uuid.uuid4()), "fp": {}}
     body[field] = value
-    assert client.post("/api/vote", json=body).status_code == 400
+    assert viewer.post("/api/vote", json=body).status_code == 400
+
+
+@pytest.mark.parametrize("options", [["0"], [True], [0.0], [0, "1"], [None]],
+                         ids=["str", "bool", "float", "mixed", "null"])
+def test_400_options_not_int_list(viewer, poll, options):
+    # api.md: options — только список целых; "0", true, 0.0 — неверный тип → 400.
+    body = {"poll_id": poll["id"], "options": options, "voter_id": str(uuid.uuid4()), "fp": {}}
+    assert viewer.post("/api/vote", json=body).status_code == 400

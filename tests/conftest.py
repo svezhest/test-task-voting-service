@@ -10,52 +10,70 @@ import pytest
 # Чтобы `import app` работал при запуске pytest из корня репозитория.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-BASE = "http://localhost:8090"
+VIEWER = "http://localhost:8090"  # зрительский вход: страница, config.json, /api/
+ADMIN = "http://localhost:8091"   # админский вход: всё то же плюс /admin/ и /manage/
 AUTH = {"Authorization": "Bearer dev-token"}
 
 def iso(ts):
     return dt.datetime.fromtimestamp(ts, dt.timezone.utc).isoformat()
 
 
-@pytest.fixture(scope="session")
-def client():
-    c = httpx.Client(base_url=BASE, timeout=10)
+def _connect(base, probe, ok_codes):
+    c = httpx.Client(base_url=base, timeout=10)
     try:
-        r = c.get("/admin/polls", headers=AUTH)
+        r = c.get(probe, headers=AUTH)
     except httpx.TransportError as e:
-        pytest.skip(f"стенд недоступен на {BASE} ({e!r}); поднимите его: make up")
-    if r.status_code != 200:
-        pytest.skip(f"на {BASE} не стенд или он не готов: GET /admin/polls → {r.status_code}; make up")
+        c.close()
+        pytest.skip(f"стенд недоступен на {base} ({e!r}); поднимите его: make up")
+    if r.status_code not in ok_codes:
+        c.close()
+        pytest.skip(f"на {base} не стенд или он не готов: GET {probe} → {r.status_code}; make up")
+    return c
+
+
+@pytest.fixture(scope="session")
+def admin():
+    c = _connect(ADMIN, "/admin/polls", {200})
     yield c
     c.close()
 
 
 @pytest.fixture(scope="session")
-def vote(client):
-    def send(poll_id, options, voter_id=None, fp=None, ip="203.0.113.1"):
+def viewer(admin):
+    # /p/{любой id} отдаёт index.html; админка здесь — 404.
+    c = _connect(VIEWER, f"/p/{uuid.uuid4()}", {200})
+    yield c
+    c.close()
+
+
+@pytest.fixture(scope="session")
+def vote(viewer):
+    def send(poll_id, options, voter_id=None, fp=None, ip="203.0.113.1", headers=None):
         body = {
             "poll_id": str(poll_id),
             "options": options,
             "voter_id": str(uuid.uuid4()) if voter_id is None else str(voter_id) if isinstance(voter_id, uuid.UUID) else voter_id,
             "fp": fp if fp is not None else {"model": "test"},
         }
-        return client.post("/api/vote", json=body, headers={"X-Forwarded-For": ip})
+        h = {"X-Forwarded-For": ip} if ip is not None else {}
+        h.update(headers or {})
+        return viewer.post("/api/vote", json=body, headers=h)
 
     return send
 
 
 @pytest.fixture(scope="session")
-def activate(client):
+def activate(admin, viewer):
     def act(poll_id):
-        r = client.post(f"/admin/polls/{poll_id}/activate", headers=AUTH)
+        r = admin.post(f"/admin/polls/{poll_id}/activate", headers=AUTH)
         assert r.status_code < 300, r.text
-        wait_loaded(client, poll_id)
+        wait_loaded(viewer, poll_id)
 
     return act
 
 
 @pytest.fixture(scope="session")
-def make_poll(client, activate):
+def make_poll(admin, activate):
     def make(labels=("Да", "Нет"), type="single", window_s=10, start_in=0, active=True):
         start = int(time.time()) + start_in
         body = {
@@ -66,7 +84,7 @@ def make_poll(client, activate):
             "window_end": iso(start + window_s),
             "grace_s": 0,
         }
-        r = client.post("/admin/polls", json=body, headers=AUTH)
+        r = admin.post("/admin/polls", json=body, headers=AUTH)
         assert r.status_code == 201, r.text
         poll_id = r.json()["id"]
         poll = {"id": poll_id, "labels": list(labels), "window_start": start, "window_end": start + window_s}
@@ -77,13 +95,13 @@ def make_poll(client, activate):
     return make
 
 
-def wait_loaded(client, poll_id):
+def wait_loaded(viewer, poll_id):
     # Приём перечитывает активные опросы раз в секунду, экземпляров несколько.
     # Пробный голос с несуществующим вариантом в Kafka не пишется: 422 (или 410 вне окна).
     deadline = time.time() + 10
     while time.time() < deadline:
         body = {"poll_id": str(poll_id), "options": [63], "voter_id": str(uuid.uuid4()), "fp": {}}
-        if client.post("/api/vote", json=body).status_code != 404:
+        if viewer.post("/api/vote", json=body).status_code != 404:
             time.sleep(1.5)  # чтобы подхватили все экземпляры приёма
             return
         time.sleep(0.2)
@@ -91,11 +109,11 @@ def wait_loaded(client, poll_id):
 
 
 @pytest.fixture(scope="session")
-def wait_final(client):
+def wait_final(admin):
     def wait(poll):
         deadline = poll["window_end"] + 60
         while time.time() < deadline:
-            r = client.get(f"/admin/polls/{poll['id']}/results", headers=AUTH)
+            r = admin.get(f"/admin/polls/{poll['id']}/results", headers=AUTH)
             assert r.status_code == 200, r.text
             if r.json().get("status") == "final":
                 return r.json()

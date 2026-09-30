@@ -8,8 +8,8 @@ AUTH = {"Authorization": "Bearer dev-token"}
 BUCKETS = {"1", "2-10", "11-100", "101+"}
 
 
-def analytics(client, pid):
-    r = client.get(f"/admin/polls/{pid}/analytics", headers=AUTH)
+def analytics(admin, pid):
+    r = admin.get(f"/admin/polls/{pid}/analytics", headers=AUTH)
     assert r.status_code == 200, r.text
     return r.json()
 
@@ -23,14 +23,14 @@ def ok(r):
 
 
 @pytest.fixture(scope="module")
-def active_poll(make_poll, vote, client):
+def active_poll(make_poll, vote, admin):
     p = make_poll(window_s=30)
     for i in range(3):
         ok(vote(p["id"], [0], None, {"model": f"a{i}"}, ip=f"198.51.100.{i + 1}"))
     # Этап 1 пишет timeline раз в секунду.
     deadline = time.time() + 10
     while time.time() < deadline:
-        a = analytics(client, p["id"])
+        a = analytics(admin, p["id"])
         if sum(t["received"] for t in a["timeline"] or []) == 3:
             return p, a
         time.sleep(0.5)
@@ -57,15 +57,15 @@ def test_active_model(active_poll):
     assert a["model"] == {"median_s": 14, "sigma": 0.5}
 
 
-def test_active_results_received(client, active_poll):
+def test_active_results_received(admin, active_poll):
     p, _ = active_poll
-    r = client.get(f"/admin/polls/{p['id']}/results", headers=AUTH).json()
+    r = admin.get(f"/admin/polls/{p['id']}/results", headers=AUTH).json()
     assert r == {"status": "active", "received": 3}
 
 
 # Окно 20 с, grace_s = 0 → R = 4, потолок на IP 5000 (не срабатывает).
 @pytest.fixture(scope="module")
-def final(make_poll, vote, wait_final, client):
+def final(make_poll, vote, wait_final, admin):
     p = make_poll(window_s=20)
     repeat = uuid.uuid4()
     for _ in range(3):  # один voter_id трижды → repeat_voter = 2
@@ -77,7 +77,7 @@ def final(make_poll, vote, wait_final, client):
     for _ in range(300):  # 300 голосов с одного IP → диапазон «101+»
         ok(vote(p["id"], [1], None, {"model": "ipad"}, ip="192.0.2.200"))
     res = wait_final(p)
-    return p, res, analytics(client, p["id"])
+    return p, res, analytics(admin, p["id"])
 
 
 def test_final_format(final):
@@ -133,19 +133,19 @@ def test_ip_concentration(final):
     assert bucket(a, "101+") == (1, 300)
 
 
-def test_draft_analytics(client, make_poll):
+def test_draft_analytics(admin, make_poll):
     p = make_poll(active=False)
-    a = analytics(client, p["id"])
+    a = analytics(admin, p["id"])
     assert a["status"] == "draft"
     assert a["timeline"] == []
     assert a["funnel"] is None
     assert a["ip_concentration"] is None
 
 
-def test_zero_votes_analytics(client, make_poll, wait_final):
+def test_zero_votes_analytics(admin, make_poll, wait_final):
     p = make_poll(window_s=3)
     wait_final(p)
-    a = analytics(client, p["id"])
+    a = analytics(admin, p["id"])
     assert a["timeline"] == []
     assert a["funnel"] == {"received": 0, "unique_voters": 0, "counted": 0,
                            "rejected": {"repeat_voter": 0, "key_limit": 0, "ip_ceiling": 0}}
