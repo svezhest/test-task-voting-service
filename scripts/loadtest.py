@@ -1,4 +1,4 @@
-"""Нагрузочный тест на поднятом стенде (make up): приём на ядро при 1/2/4 репликах, этап 1, время до итога.
+"""Нагрузочный тест на поднятом стенде (make up): приём на ядро при 1/2/4 репликах, этап 1 при 1/2/4 процессах, время до итога.
 
 Генератор — этот же файл в режиме `gen` внутри сети compose (сервис `load`): бьёт прямо в ingest:8000,
 минуя nginx и проброс портов. CPU приёма — из cgroup контейнеров только за окно замера.
@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 ADMIN, TOKEN = "http://localhost:8091/admin", os.environ.get("ADMIN_TOKEN", "dev-token")
 REPLICAS = [int(n) for n in os.environ.get("REPLICAS", "1 2 4").split()]
+WORKERS = [int(n) for n in os.environ.get("WORKERS", "1 2 4").split()]  # процессов этапа 1 (STAGE1_WORKERS)
 WARMUP, SECONDS = 3, int(os.environ.get("LOAD_SECONDS", "15"))  # CPU меряется только за SECONDS после прогрева
 PROCS, CONNS = 2, 32  # на реплику: процессов генератора и соединений keep-alive в каждом
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -98,16 +99,16 @@ def cpu_seconds(ids):  # usage_usec из cgroup всех контейнеров,
     return sum(int(p.communicate()[0].split()[1]) for p in ps) / 1e6
 
 
-def rss_mib(service):
-    status = sh("docker", "compose", "exec", "-T", service, "cat", "/proc/1/status")
+def rss_mib(container):
+    status = sh("docker", "exec", container, "cat", "/proc/1/status")
     return int(next(l for l in status.splitlines() if l.startswith("VmRSS")).split()[1]) / 1024
 
 
-def ingest_run(poll, n):
+def ingest_run(poll, n, seconds=SECONDS):
     sh("docker", "compose", "up", "-d", "--no-deps", "--scale", f"ingest={n}", "ingest")
     time.sleep(5)  # новые реплики подключаются к Kafka и читают опросы
     ids = sh("docker", "compose", "ps", "-q", "ingest").split()
-    p = subprocess.Popen(["docker", "compose", "run", "--rm", "--no-deps", "-T", "load", "python", "scripts/loadtest.py", "gen", poll, str(SECONDS)],
+    p = subprocess.Popen(["docker", "compose", "run", "--rm", "--no-deps", "-T", "load", "python", "scripts/loadtest.py", "gen", poll, str(seconds)],
                          cwd=ROOT, stdout=subprocess.PIPE, text=True)
     for line in p.stdout:
         word, *rest = line.split()
@@ -135,38 +136,70 @@ def machine():
     return f"{cpu}, {os.cpu_count()} ядер, {host_os} {platform.machine()}; {name} {version}: {ncpu} CPU, {int(mem) / 2**30:.1f} ГиБ"
 
 
-def main():
-    sh("docker", "compose", "restart", "stage1")
-    time.sleep(3)
-    rss0 = rss_mib("stage1")  # свежий процесс без опросов — точка отсчёта памяти
+def new_poll():
     now = datetime.now(timezone.utc)
     poll = api("POST", "/polls", {"question": "loadtest", "type": "single", "options": ["A", "B", "C", "D"],
                                    "window_start": now.isoformat(), "window_end": (now + timedelta(minutes=30)).isoformat(), "grace_s": 0})
     api("POST", f"/polls/{poll['id']}/activate")
-    sh("docker", "compose", "stop", "stage1")  # этап 1 копит отставание, потом догоняет: так видна его скорость, а не скорость приёма
-    rows, n_votes = [], 0
+    return poll["id"]
+
+
+def forwarded(rpk):  # записей в votes_by_ip: этап 1 пересылает туда каждый новый voter_id сразу, а received обновляет раз в секунду
+    out = sh("docker", "exec", rpk, "rpk", "topic", "describe", "votes_by_ip", "-p", "-X", "brokers=redpanda:9092")
+    return sum(int(line.split()[-1]) for line in out.splitlines()[1:])  # HIGH-WATERMARK
+
+
+def stage1_run(w, poll, n_votes):
+    """w временных процессов этапа 1 догоняют отставание опроса (основной stage1 остановлен), потом итог и удаление опроса."""
+    rpk = sh("docker", "compose", "run", "-d", "--no-deps", "--entrypoint", "sleep", "topics", "infinity")  # rpk не в cgroup брокера
+    base = forwarded(rpk)
+    runs = [subprocess.Popen(["docker", "compose", "run", "-d", "--no-deps", "-e", f"STAGE1_WORKERS={w}", "-e", f"STAGE1_WORKER_INDEX={i}", "stage1"],
+                             cwd=ROOT, stdout=subprocess.PIPE, text=True) for i in range(w)]  # стартуют одновременно
+    ids, redpanda = [p.communicate()[0].strip() for p in runs], sh("docker", "compose", "ps", "-q", "redpanda")
     try:
+        # скорость и CPU — по пересылке от 10 % до 90 % отставания (все голоса теста — разные voter_id): без разброса
+        # старта процессов и шага их отчётов в 1 с, которые при 4 процессах сравнимы со всем догоном (~4 с)
+        first = None
+        while (done := forwarded(rpk) - base) < 0.9 * n_votes:
+            if done >= 0.1 * n_votes and not first:
+                first = time.time(), done, cpu_seconds(ids), cpu_seconds([redpanda])
+        (t0, v0, c0, r0), dt = first, time.time() - first[0]
+        rate, cores, rp_cores = (done - v0) / dt, (cpu_seconds(ids) - c0) / dt, (cpu_seconds([redpanda]) - r0) / dt
+        while api("GET", f"/polls/{poll}/results")["received"] < n_votes:  # итог — после полного догона
+            time.sleep(0.2)
+        rss = rss_mib(ids[0])
+        api("POST", f"/polls/{poll}/finish")
+        t_close = time.time()
+        while (res := api("GET", f"/polls/{poll}/results"))["status"] != "final":
+            time.sleep(0.2)
+        t_final = time.time() - t_close
+        api("DELETE", f"/polls/{poll}")
+    finally:
+        sh("docker", "rm", "-f", rpk, *ids)
+    return rate, cores, rp_cores, rss, t_final, res
+
+
+def main():
+    sh("docker", "compose", "restart", "stage1")
+    time.sleep(3)
+    rss0 = rss_mib(sh("docker", "compose", "ps", "-q", "stage1"))  # свежий процесс без опросов — точка отсчёта памяти
+    sh("docker", "compose", "stop", "stage1")  # этап 1 копит отставание, потом догоняет: так видна его скорость, а не скорость приёма
+    rows, stage1 = [], []
+    try:
+        poll, n_votes = new_poll(), 0
         for n in REPLICAS:
-            rps, cores, total, bad = ingest_run(poll["id"], n)
+            rps, cores, total, bad = ingest_run(poll, n)
             rows.append((n, rps, cores, bad))
             n_votes += total
+        fill = max(1, round(n_votes / rows[-1][1]) - WARMUP - 1)  # секунд приёма до того же объёма на последнем числе реплик
+        for k, w in enumerate(WORKERS):
+            if k:  # своё отставание на каждое число процессов: новый опрос, этап 1 остановлен
+                poll = new_poll()
+                n_votes = ingest_run(poll, REPLICAS[-1], fill)[2]
+            stage1.append((w, n_votes) + stage1_run(w, poll, n_votes))
     finally:
         sh("docker", "compose", "up", "-d", "--no-deps", "--scale", "ingest=2", "ingest")
         sh("docker", "compose", "start", "stage1")
-    samples = []  # (время, голосов в stage_progress): скорость — по приросту после первого отчёта этапа 1
-    while not samples or samples[-1][1] < n_votes:
-        time.sleep(0.5)
-        if received := api("GET", f"/polls/{poll['id']}/results")["received"]:
-            samples.append((time.time(), received))
-    (t0, v0), (t1, v1) = samples[0], samples[-1]
-    stage1_rate, rss1 = (v1 - v0) / (t1 - t0) if v1 > v0 else float("nan"), rss_mib("stage1")
-
-    api("POST", f"/polls/{poll['id']}/finish")
-    t_close = time.time()
-    while (res := api("GET", f"/polls/{poll['id']}/results"))["status"] != "final":
-        time.sleep(0.2)
-    t_final = time.time() - t_close
-    api("DELETE", f"/polls/{poll['id']}")
 
     print(f"\nМашина: {machine()}")
     print(f"Приём: генератор в сети compose -> ingest:8000, {PROCS * CONNS} соединений keep-alive на реплику, "
@@ -176,9 +209,15 @@ def main():
         print(f"{n:>7} {rps:>10.0f} {cores:>6.2f} {rps / cores:>8.0f} {bad:>7}")
     if any(r[3] for r in rows):
         print("ВНИМАНИЕ: не все ответы 204")
-    print(f"Этап 1: догоняет отставание в {n_votes} голосов со скоростью {stage1_rate:.0f} голосов/с; "
-          f"RSS {rss0:.0f} -> {rss1:.0f} МиБ, {(rss1 - rss0) * 2**20 / n_votes:.0f} Б на уникальный voter_id (вместе с буферами Kafka)")
-    print(f"Этап 2: от закрытия окна до final {t_final:.1f} с (включая delivery.timeout 3 с); "
+    print("Этап 1: догоняет отставание опроса (с пересылкой в votes_by_ip); скорость (по votes_by_ip) и CPU (ядер, cgroup) — от 10 % до 90 % отставания; "
+          "Redpanda — один брокер стенда, --smp 1")
+    print(f"{'процессов':>9} {'голосов':>8} {'голосов/с':>10} {'на процесс':>11} {'CPU этапа 1':>12} {'CPU Redpanda':>13}")
+    for w, n, rate, cores, rp_cores, *_ in stage1:
+        print(f"{w:>9} {n:>8} {rate:>10.0f} {rate / w:>11.0f} {cores:>12.2f} {rp_cores:>13.2f}")
+    w, n_votes, _, _, _, rss1, t_final, res = stage1[0]
+    print(f"Память этапа 1 ({w} процесс): RSS {rss0:.0f} -> {rss1:.0f} МиБ, "
+          f"{(rss1 - rss0) * 2**20 * w / n_votes:.0f} Б на уникальный voter_id (вместе с буферами Kafka)")
+    print(f"Этап 2: от закрытия окна до final {t_final:.1f} с по {n_votes} голосам (включая delivery.timeout 3 с); "
           f"received {res['received']}, total {res['total']}, counted {res['counted']}")
 
 
