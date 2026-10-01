@@ -342,7 +342,7 @@ function formView(p) {
     </div>
     <p class="muted small hint">Время местное, по часам этого компьютера (${zone(start)}).
       Задержка — сколько секунд после конца ещё принимать голоса: у части зрителей трансляция отстаёт.</p>
-    ${/^(Etc\/)?UTC$/.test(Intl.DateTimeFormat().resolvedOptions().timeZone) ? '<p class="muted tz">ваш браузер скрывает часовой пояс — время показано по UTC</p>' : ''}</fieldset>
+    ${start.getTimezoneOffset() === 0 ? '<p class="muted tz">Браузер показывает время по UTC. Если вы не в этом поясе, браузер его скрывает (защита от слежки, как в LibreWolf или Tor): вводите время по UTC</p>' : ''}</fieldset>
     <div class="actions">
       <button>${p ? 'Сохранить' : 'Создать черновик'}</button>
       <a class="btn ghost" href="${p ? '#/p/' + esc(p.id) : '#/'}">Отмена</a>
@@ -411,6 +411,12 @@ function dialog(title, texts, buttons) {
         `<button value="${v}" class="${cls}"${i === buttons.length - 1 ? ' autofocus' : ''}>${esc(label)}</button>`).join('')}</form>`;
     document.body.append(d);
     d.onclose = () => { d.remove(); resolve(d.returnValue); };
+    // клик мимо окна — как Esc: закрыть, ничего не выбрав
+    d.onclick = e => {
+      const box = d.getBoundingClientRect();
+      const outside = e.clientX < box.left || e.clientX > box.right || e.clientY < box.top || e.clientY > box.bottom;
+      if (e.target === d && outside) d.close('');
+    };
     d.showModal();
   });
 }

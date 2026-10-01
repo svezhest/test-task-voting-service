@@ -1,5 +1,4 @@
 import asyncio
-import os
 import struct
 from collections import Counter, defaultdict
 
@@ -8,14 +7,25 @@ import psycopg
 from aiokafka import AIOKafkaConsumer, TopicPartition
 from psycopg.types.json import Jsonb
 
-from app.dedup import estimate_people_many, ip_ceiling, key_limit, poisson_limits, repeat_budget
+from app.config import (
+    DATABASE_URL,
+    DELIVERY_TIMEOUT_S,
+    KAFKA_BOOTSTRAP,
+    KAFKA_POLL_TIMEOUT_S,
+    PARTITION_COUNT,
+    STAGE2_FETCH_MAX_WAIT_S,
+    STAGE2_LOOP_INTERVAL_S,
+    STAGE2_WORKER_INDEX,
+    STAGE2_WORKERS,
+)
+from app.dedup import estimate_people_batch, ip_ceiling, key_limit, poisson_limits, repeat_budget
 from app.record import POLL_ID_BYTES, decode
 
-PARTITION_COUNT = 8
-WORKERS = int(os.environ["STAGE2_WORKERS"])
-WORKER_INDEX = int(os.environ["STAGE2_WORKER_INDEX"])
-MY_PARTITIONS = [partition for partition in range(PARTITION_COUNT) if partition % WORKERS == WORKER_INDEX]
-DELIVERY_TIMEOUT_S = float(os.environ["DELIVERY_TIMEOUT_S"])
+MY_PARTITIONS = [
+    partition
+    for partition in range(PARTITION_COUNT)
+    if partition % STAGE2_WORKERS == STAGE2_WORKER_INDEX
+]
 
 ALL_VOTES_IDX = -1
 IP_BUCKETS = ["1", "2-10", "11-100", "101+"]
@@ -104,7 +114,7 @@ async def read_partition(consumer, partition, poll_id, window_start_ms, accepts_
         return votes, end_offset
     consumer.seek(topic_partition, window_start_offset.offset)
     while await consumer.position(topic_partition) < end_offset:
-        messages_by_partition = await consumer.getmany(topic_partition, timeout_ms=1000)
+        messages_by_partition = await consumer.getmany(topic_partition, timeout_ms=int(KAFKA_POLL_TIMEOUT_S * 1000))
         for message in messages_by_partition.get(topic_partition, []):
             if message.offset >= end_offset:
                 continue
@@ -149,7 +159,7 @@ def key_limits(votes, fingerprint_shares, all_shares, max_repeats):
         fingerprints_by_ip[vote.ip_hmac].add(vote.fp_hash)
         voters_by_key[vote.ip_hmac, vote.fp_hash] += 1
     distinct_fingerprints = numpy.array([len(fingerprints) for fingerprints in fingerprints_by_ip.values()])
-    people_by_ip = dict(zip(fingerprints_by_ip, estimate_people_many(distinct_fingerprints, all_shares)))
+    people_by_ip = dict(zip(fingerprints_by_ip, estimate_people_batch(distinct_fingerprints, all_shares)))
     expected_honest_people = numpy.array(
         [people_by_ip[ip_hmac] * fingerprint_shares[fp_hash] for ip_hmac, fp_hash in voters_by_key]
     )
@@ -228,11 +238,11 @@ async def pass2(connection, poll_id, partitions, window_s):
 
 
 async def main():
-    connection = await psycopg.AsyncConnection.connect(os.environ["DATABASE_URL"], autocommit=True)
+    connection = await psycopg.AsyncConnection.connect(DATABASE_URL, autocommit=True)
     consumer = AIOKafkaConsumer(
-        bootstrap_servers=os.environ["KAFKA_BOOTSTRAP"],
+        bootstrap_servers=KAFKA_BOOTSTRAP,
         enable_auto_commit=False,
-        fetch_max_wait_ms=20,  # we read up to a known end: do not wait for new data
+        fetch_max_wait_ms=int(STAGE2_FETCH_MAX_WAIT_S * 1000),  # we read up to a known end: do not wait for new data
     )
     await consumer.start()
     waiting_for_barrier = {}
@@ -256,7 +266,7 @@ async def main():
             elif all_fp_counts_written:
                 await pass2(connection, poll_id, waiting_for_barrier.pop(poll_id), window_s)
                 results_written.add(poll_id)
-        await asyncio.sleep(1)
+        await asyncio.sleep(STAGE2_LOOP_INTERVAL_S)
 
 
 if __name__ == "__main__":

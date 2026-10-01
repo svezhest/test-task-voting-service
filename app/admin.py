@@ -1,29 +1,29 @@
 import json
 import os
 import shutil
-import subprocess
-import threading
-import time
-import urllib.request
 import uuid
 from pathlib import Path
 from typing import Annotated, Literal
 
 import psycopg
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from psycopg.rows import dict_row
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from app.config import ADMIN_TOKEN, DATABASE_URL, HOST_LAN_IP, WEB_ROOT
+from app.tunnel import CloudflareTunnel
+
 
 def check_token(authorization: str = Header("")):
-    if authorization != f"Bearer {os.environ['ADMIN_TOKEN']}":
+    if authorization != f"Bearer {ADMIN_TOKEN}":
         raise HTTPException(401)
 
 
 app = FastAPI(dependencies=[Depends(check_token)])
+app.state.tunnel = CloudflareTunnel()
 
 
 @app.exception_handler(RequestValidationError)
@@ -67,7 +67,7 @@ FIXED_ARRIVAL_MODEL = {"median_s": 14, "sigma": 0.5}
 
 
 def connect():
-    return psycopg.connect(os.environ["DATABASE_URL"], row_factory=dict_row)
+    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
 
 
 def get_poll_or_404(conn, poll_id):
@@ -181,7 +181,7 @@ def update_poll(poll_id: uuid.UUID, patch: dict):
 
 def publish_page_config(poll_id, poll):
     config = {key: poll[key] for key in ("id", "question", "type", "options", "window_start", "window_end", "grace_s")}
-    path = Path(os.environ["WEB_ROOT"], "p", str(poll_id), "config.json")
+    path = Path(WEB_ROOT, "p", str(poll_id), "config.json")
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_name("config.json.tmp")  # atomic: nginx never serves a half-written file
     temporary_path.write_text(json.dumps(jsonable_encoder(config), ensure_ascii=False))
@@ -251,7 +251,7 @@ def delete_poll(poll_id: uuid.UUID):
         )
         if deleted.rowcount == 0:
             raise HTTPException(409)  # rolls back the deletes above
-    shutil.rmtree(Path(os.environ["WEB_ROOT"], "p", str(poll_id)), ignore_errors=True)
+    shutil.rmtree(Path(WEB_ROOT, "p", str(poll_id)), ignore_errors=True)
 
 
 @app.get("/admin/polls")
@@ -260,76 +260,24 @@ def list_polls():
         return conn.execute(SELECT_POLLS + " order by created_at desc").fetchall()
 
 
-tunnel_process = None
-tunnel_lock = threading.Lock()
-
-
-def read_cloudflared_metrics(path):
-    with urllib.request.urlopen(f"http://127.0.0.1:2000{path}", timeout=1) as response:
-        return json.load(response)
-
-
-def tunnel_is_running():
-    return tunnel_process is not None and tunnel_process.poll() is None
-
-
-def tunnel_url():
-    if not tunnel_is_running():
-        return None
-    try:
-        hostname = read_cloudflared_metrics("/quicktunnel").get("hostname")
-    except Exception:  # not up yet
-        return None
-    if not hostname:
-        return None
-    return f"https://{hostname}"
-
-
-def tunnel_is_ready():
-    try:
-        connected = read_cloudflared_metrics("/ready")["readyConnections"] > 0
-    except Exception:  # metrics not up yet; /ready is 503 until the first connection
-        return False
-    return connected and tunnel_url() is not None
-
-
 @app.get("/admin/public-url")
-def public_url():
-    lan_ip = os.environ.get("HOST_LAN_IP")
+def public_url(request: Request):
     lan_url = None
-    if lan_ip:
-        lan_url = f"http://{lan_ip}:8090"
-    return {"tunnel": tunnel_url(), "lan": lan_url}
+    if HOST_LAN_IP:
+        lan_url = f"http://{HOST_LAN_IP}:8090"
+    return {"tunnel": request.app.state.tunnel.url(), "lan": lan_url}
 
 
 @app.post("/admin/tunnel")
-def open_tunnel():
-    global tunnel_process
-    with tunnel_lock:
-        if not tunnel_is_running():
-            tunnel_process = subprocess.Popen(
-                ["cloudflared", "tunnel", "--no-autoupdate", "--metrics", "127.0.0.1:2000", "--url", "http://nginx:82"]
-            )
-        for _ in range(30):
-            if tunnel_is_ready():
-                return public_url()
-            time.sleep(1)
-        stop_tunnel()
-    raise HTTPException(503)
-
-
-def stop_tunnel():
-    global tunnel_process
-    if tunnel_process is not None:
-        tunnel_process.terminate()
-        tunnel_process.wait()
-        tunnel_process = None
+def open_tunnel(request: Request):
+    if not request.app.state.tunnel.open():
+        raise HTTPException(503)
+    return public_url(request)
 
 
 @app.delete("/admin/tunnel", status_code=204)
-def close_tunnel():
-    with tunnel_lock:
-        stop_tunnel()
+def close_tunnel(request: Request):
+    request.app.state.tunnel.close()
 
 
 @app.get("/admin/polls/{poll_id}")

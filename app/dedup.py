@@ -4,7 +4,8 @@ import numpy
 from scipy.optimize import brentq
 from scipy.stats import poisson
 
-HONEST_QUANTILE = 0.9999
+from app.config import HONEST_QUANTILE, IP_CEILING_PER_MINUTE, SECONDS_PER_REPEAT
+
 LOG_BINS = 200
 BISECTION_STEPS = 60
 
@@ -19,8 +20,10 @@ def poisson_limits(lam: numpy.ndarray) -> numpy.ndarray:
     return 1 + poisson.ppf(HONEST_QUANTILE, lam).astype(numpy.int64)
 
 
-# exact, over the full array (stage 2 uses estimate_people_many)
 def estimate_people(d: int, p: numpy.ndarray) -> float:
+    """How many people n behind one IP showed d distinct fingerprints, if fingerprint f is seen with probability p(f).
+    n people show on average Σ(1 − (1 − p)^n) distinct fingerprints; we find the n where that equals d.
+    Exact, over the full array; stage 2 uses estimate_people_batch."""
     if d == 0:
         return 0.0
     if d == 1:
@@ -29,16 +32,16 @@ def estimate_people(d: int, p: numpy.ndarray) -> float:
         return float(d)
     log_one_minus_p = numpy.log1p(-numpy.asarray(p, dtype=float))
 
-    def expected_minus_observed(n):
-        return -numpy.expm1(n * log_one_minus_p).sum() - d
+    def expected_distinct(people):
+        return -numpy.expm1(people * log_one_minus_p).sum()
 
     upper = 2.0
-    while expected_minus_observed(upper) < 0:
+    while expected_distinct(upper) < d:
         upper *= 2
-    return brentq(expected_minus_observed, 0.0, upper)
+    return brentq(lambda people: expected_distinct(people) - d, 0.0, upper)
 
 
-def estimate_people_many(d: numpy.ndarray, p: numpy.ndarray) -> numpy.ndarray:
+def estimate_people_batch(d: numpy.ndarray, p: numpy.ndarray) -> numpy.ndarray:
     """estimate_people for many d at once: p folded into log bins (mean p per bin), bisection per distinct d."""
     log_p = numpy.log(p)
     bin_sizes, bin_edges = numpy.histogram(log_p, bins=LOG_BINS)
@@ -51,18 +54,18 @@ def estimate_people_many(d: numpy.ndarray, p: numpy.ndarray) -> numpy.ndarray:
     solvable = (distinct_d > 1) & (distinct_d < len(p))
     target_d = numpy.where(solvable, distinct_d, 0)  # others have no root to find
 
-    def expected_minus_observed(n):
-        return -(bin_sizes * numpy.expm1(n[:, None] * log_one_minus_bin_p)).sum(axis=1) - target_d
+    def expected_distinct(people):
+        return -(bin_sizes * numpy.expm1(people[:, None] * log_one_minus_bin_p)).sum(axis=1)
 
     lower = numpy.zeros(len(distinct_d))
     upper = numpy.full(len(distinct_d), 2.0)
-    upper_too_low = expected_minus_observed(upper) < 0
+    upper_too_low = expected_distinct(upper) < target_d
     while upper_too_low.any():
         upper[upper_too_low] *= 2
-        upper_too_low = expected_minus_observed(upper) < 0
+        upper_too_low = expected_distinct(upper) < target_d
     for _ in range(BISECTION_STEPS):
         middle = (lower + upper) / 2
-        root_above_middle = expected_minus_observed(middle) < 0
+        root_above_middle = expected_distinct(middle) < target_d
         lower = numpy.where(root_above_middle, middle, lower)
         upper = numpy.where(root_above_middle, upper, middle)
     estimate_per_distinct_d = numpy.where(solvable, (lower + upper) / 2, distinct_d)
@@ -74,8 +77,8 @@ def key_limit(n_limit: int, distinct_voters: int, r: int) -> int:
 
 
 def repeat_budget(window_seconds: float) -> int:
-    return math.floor(window_seconds / 5)
+    return math.floor(window_seconds / SECONDS_PER_REPEAT)
 
 
 def ip_ceiling(window_seconds: float) -> int:
-    return 5000 * math.ceil(window_seconds / 60)
+    return IP_CEILING_PER_MINUTE * math.ceil(window_seconds / 60)

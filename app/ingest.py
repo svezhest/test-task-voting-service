@@ -3,7 +3,6 @@ import hashlib
 import hmac
 import ipaddress
 import json
-import os
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -16,12 +15,20 @@ from pydantic import BaseModel, StrictInt
 
 from app.record import Vote, encode
 
-TRUST_XFF = os.environ["TRUST_XFF"] == "1"
-DELIVERY_TIMEOUT_S = float(os.environ["DELIVERY_TIMEOUT_S"])
-MISS_RELOAD_INTERVAL_S = 0.2
-UNKNOWN_POLL_MEMORY_S = 1
+from app.config import (
+    CLOSED_POLL_MEMORY_S,
+    DATABASE_URL,
+    DELIVERY_TIMEOUT_S,
+    KAFKA_BOOTSTRAP,
+    MISS_RELOAD_INTERVAL_S,
+    POLLS_QUERY_TIMEOUT_S,
+    POLLS_REFRESH_INTERVAL_S,
+    POSTGRES_CONNECT_TIMEOUT_S,
+    TRUST_XFF,
+    UNKNOWN_POLL_MEMORY_S,
+)
 
-# A poll closed more than a day ago is not loaded: 410 is needed only right after the window, later it is 404.
+# After CLOSED_POLL_MEMORY_S a closed poll is not loaded: 410 matters only right after the window, later it is 404.
 RECENT_POLLS = """
 select polls.id,
        polls.type,
@@ -32,66 +39,73 @@ select polls.id,
   from polls
   join options on options.poll_id = polls.id
  where polls.status <> 'draft'
-   and polls.window_end + make_interval(secs => polls.grace_s) > now() - interval '1 day'
+   and polls.window_end + make_interval(secs => polls.grace_s) > now() - make_interval(secs => %s)
  group by polls.id
 """
 
-polls = {}
-producer: AIOKafkaProducer
-polls_connection = None
-polls_lock = asyncio.Lock()
-miss_reload = None
-miss_reload_starts_at = 0.0
-unknown_polls_until = {}  # random poll_ids must not load Postgres
 
+class PollCache:
+    """Polls ingest accepts votes for: re-read from Postgres every second and, at most every 200 ms, after a miss."""
 
-async def load_polls():
-    global polls, polls_connection
-    async with polls_lock:
-        try:
-            if polls_connection is None or polls_connection.closed:
-                polls_connection = await psycopg.AsyncConnection.connect(
-                    os.environ["DATABASE_URL"], autocommit=True, connect_timeout=2
+    def __init__(self):
+        self.polls = {}
+        self.connection = None
+        self.lock = asyncio.Lock()
+        self.miss_reload = None
+        self.miss_reload_starts_at = 0.0
+        self.unknown_polls_until = {}  # random poll_ids must not load Postgres
+
+    async def load(self):
+        async with self.lock:
+            try:
+                if self.connection is None or self.connection.closed:
+                    self.connection = await psycopg.AsyncConnection.connect(
+                        DATABASE_URL, autocommit=True, connect_timeout=POSTGRES_CONNECT_TIMEOUT_S
+                    )
+                # a silently dead connection must not hold the lock for minutes
+                cursor = await asyncio.wait_for(
+                    self.connection.execute(RECENT_POLLS, (CLOSED_POLL_MEMORY_S,)), POLLS_QUERY_TIMEOUT_S
                 )
-            # a silently dead connection must not hold the lock for minutes
-            cursor = await asyncio.wait_for(polls_connection.execute(RECENT_POLLS), 2)
-            polls = {row[0]: row[1:] for row in await cursor.fetchall()}
-        except (psycopg.Error, TimeoutError) as error:  # Postgres is down: keep working on the last polls
-            print("polls refresh failed:", repr(error), flush=True)
-            polls_connection = None
+                self.polls = {row[0]: row[1:] for row in await cursor.fetchall()}
+            except (psycopg.Error, TimeoutError) as error:  # Postgres is down: keep working on the last polls
+                print("polls refresh failed:", repr(error), flush=True)
+                self.connection = None
 
+    async def refresh_forever(self):
+        while True:
+            await self.load()
+            now = time.monotonic()
+            self.unknown_polls_until = {
+                poll_id: until for poll_id, until in self.unknown_polls_until.items() if until > now
+            }
+            await asyncio.sleep(POLLS_REFRESH_INTERVAL_S)
 
-async def refresh_polls_every_second():
-    global unknown_polls_until
-    while True:
-        await load_polls()
-        unknown_polls_until = {
-            poll_id: until for poll_id, until in unknown_polls_until.items() if until > time.monotonic()
-        }
-        await asyncio.sleep(1)
+    async def get(self, poll_id, arrived_at):
+        is_known = poll_id in self.polls
+        recently_missed = self.unknown_polls_until.get(poll_id, 0) >= time.monotonic()
+        if not is_known and not recently_missed:
+            await self.reload_after_miss(poll_id, arrived_at)
+        return self.polls.get(poll_id)
 
+    async def reload_after_miss(self, poll_id, arrived_at):
+        latest_reload_may_miss_this_poll = self.miss_reload_starts_at < arrived_at
+        if latest_reload_may_miss_this_poll:
+            self.miss_reload_starts_at = max(self.miss_reload_starts_at + MISS_RELOAD_INTERVAL_S, arrived_at)
+            self.miss_reload = asyncio.create_task(self.load_at(self.miss_reload_starts_at))
+        await asyncio.shield(self.miss_reload)  # a client that hangs up does not cancel the reload for the others
+        if poll_id not in self.polls:
+            self.unknown_polls_until[poll_id] = time.monotonic() + UNKNOWN_POLL_MEMORY_S
 
-async def load_polls_at(moment):
-    await asyncio.sleep(moment - time.monotonic())
-    await load_polls()
-
-
-async def reload_polls_after_miss(poll_id, arrived_at):
-    global miss_reload, miss_reload_starts_at
-    latest_reload_may_miss_this_poll = miss_reload_starts_at < arrived_at
-    if latest_reload_may_miss_this_poll:
-        miss_reload_starts_at = max(miss_reload_starts_at + MISS_RELOAD_INTERVAL_S, arrived_at)
-        miss_reload = asyncio.create_task(load_polls_at(miss_reload_starts_at))
-    await asyncio.shield(miss_reload)  # a client that hangs up does not cancel the reload for the others
-    if poll_id not in polls:
-        unknown_polls_until[poll_id] = time.monotonic() + UNKNOWN_POLL_MEMORY_S
+    async def load_at(self, moment):
+        await asyncio.sleep(moment - time.monotonic())
+        await self.load()
 
 
 @asynccontextmanager
 async def lifespan(app):
-    global producer
-    producer = AIOKafkaProducer(
-        bootstrap_servers=os.environ["KAFKA_BOOTSTRAP"],
+    app.state.polls = PollCache()
+    app.state.producer = AIOKafkaProducer(
+        bootstrap_servers=KAFKA_BOOTSTRAP,
         acks="all",
         enable_idempotence=True,
         compression_type="lz4",
@@ -99,11 +113,11 @@ async def lifespan(app):
         # so a vote answered 503 may still reach Kafka later (architecture.md, ingest).
         request_timeout_ms=int(DELIVERY_TIMEOUT_S * 1000),
     )
-    await producer.start()
-    polls_refresher = asyncio.create_task(refresh_polls_every_second())
+    await app.state.producer.start()
+    polls_refresher = asyncio.create_task(app.state.polls.refresh_forever())
     yield
     polls_refresher.cancel()
-    await producer.stop()
+    await app.state.producer.stop()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -155,9 +169,7 @@ async def vote(body: VoteIn, request: Request):
         ip = client_ip(request)
     except ValueError:
         return Response(status_code=400)
-    if body.poll_id not in polls and unknown_polls_until.get(body.poll_id, 0) < time.monotonic():
-        await reload_polls_after_miss(body.poll_id, arrived_at)
-    poll = polls.get(body.poll_id)
+    poll = await request.app.state.polls.get(body.poll_id, arrived_at)
     if poll is None:
         return Response(status_code=404)
 
@@ -188,7 +200,7 @@ async def vote(body: VoteIn, request: Request):
     )
     try:
         await asyncio.wait_for(
-            producer.send_and_wait("votes_raw", record, key=body.voter_id.bytes),
+            request.app.state.producer.send_and_wait("votes_raw", record, key=body.voter_id.bytes),
             DELIVERY_TIMEOUT_S,
         )
     except Exception:

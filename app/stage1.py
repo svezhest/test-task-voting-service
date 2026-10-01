@@ -1,22 +1,27 @@
 import asyncio
-import os
 import time
 from collections import Counter, defaultdict
 
 import psycopg
 from aiokafka import AIOKafkaConsumer, AIOKafkaProducer, TopicPartition
 
+from app.config import (
+    DATABASE_URL,
+    DELIVERY_TIMEOUT_S,
+    KAFKA_BOOTSTRAP,
+    KAFKA_POLL_TIMEOUT_S,
+    PARTITION_COUNT,
+    STAGE1_REPORT_INTERVAL_S,
+    STAGE1_WORKER_INDEX,
+    STAGE1_WORKERS,
+)
 from app.record import VOTER_ID_BYTES, decode
 
-PARTITION_COUNT = 8
-WORKERS = int(os.environ["STAGE1_WORKERS"])
-WORKER_INDEX = int(os.environ["STAGE1_WORKER_INDEX"])
 MY_PARTITIONS = [
     TopicPartition("votes_raw", partition)
     for partition in range(PARTITION_COUNT)
-    if partition % WORKERS == WORKER_INDEX
+    if partition % STAGE1_WORKERS == STAGE1_WORKER_INDEX
 ]
-DELIVERY_TIMEOUT_S = float(os.environ["DELIVERY_TIMEOUT_S"])
 
 UNFINISHED_POLLS = """
 select id,
@@ -135,11 +140,10 @@ async def write_progress(connection, consumer, polls, received_count, timeline, 
 
 
 async def main():
-    kafka_bootstrap = os.environ["KAFKA_BOOTSTRAP"]
-    connection = await psycopg.AsyncConnection.connect(os.environ["DATABASE_URL"], autocommit=True)
-    consumer = AIOKafkaConsumer(bootstrap_servers=kafka_bootstrap, enable_auto_commit=False)
+    connection = await psycopg.AsyncConnection.connect(DATABASE_URL, autocommit=True)
+    consumer = AIOKafkaConsumer(bootstrap_servers=KAFKA_BOOTSTRAP, enable_auto_commit=False)
     producer = AIOKafkaProducer(
-        bootstrap_servers=kafka_bootstrap, acks="all", enable_idempotence=True, compression_type="lz4"
+        bootstrap_servers=KAFKA_BOOTSTRAP, acks="all", enable_idempotence=True, compression_type="lz4"
     )
     await consumer.start()
     await producer.start()
@@ -155,7 +159,7 @@ async def main():
     deliveries_since_report = []
     last_report_at = 0.0
     while True:
-        messages_by_partition = await consumer.getmany(timeout_ms=1000)
+        messages_by_partition = await consumer.getmany(timeout_ms=int(KAFKA_POLL_TIMEOUT_S * 1000))
         batch = [
             (topic_partition.partition, message.value, decode(message.value))
             for topic_partition, messages in messages_by_partition.items()
@@ -177,7 +181,7 @@ async def main():
                 seen_voter_ids[key].add(voter_id)
                 deliveries_since_report.append(await producer.send("votes_by_ip", record, key=vote.ip_hmac))
 
-        if time.monotonic() - last_report_at >= 1:
+        if time.monotonic() - last_report_at >= STAGE1_REPORT_INTERVAL_S:
             last_report_at = time.monotonic()
             await asyncio.gather(*deliveries_since_report)  # raises on a failed delivery: the restart forwards again
             deliveries_since_report.clear()

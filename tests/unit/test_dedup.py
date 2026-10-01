@@ -3,7 +3,7 @@ import math
 import numpy as np
 import pytest
 
-from app.dedup import estimate_people, ip_ceiling, key_limit, poisson_limit, repeat_budget
+from app.dedup import estimate_people, estimate_people_batch, ip_ceiling, key_limit, poisson_limit, repeat_budget
 
 # Таблица N из architecture_deduplication.md: строки — людей за IP (n), столбцы — p(f); λ = n·p.
 N_TABLE = [
@@ -103,3 +103,23 @@ def test_repeat_budget(seconds, expected):
 @pytest.mark.parametrize("seconds,expected", [(60, 5000), (61, 10000), (1, 5000), (120, 10000), (121, 15000)])
 def test_ip_ceiling(seconds, expected):
     assert ip_ceiling(seconds) == expected
+
+
+ZIPF_WEIGHTS = 1 / np.arange(1, 5001) ** 1.1
+ZIPF_P = ZIPF_WEIGHTS / ZIPF_WEIGHTS.sum()  # a few common fingerprints and a long tail of rare ones
+
+
+def test_estimate_people_batch_matches_one_by_one():
+    d = np.array([0, 1, 2, 3, 5, 10, 30, 100, 300, 1000, 4999, 5000, 6000])
+    one_by_one = [estimate_people(int(observed), ZIPF_P) for observed in d]
+    assert estimate_people_batch(d, ZIPF_P) == pytest.approx(one_by_one, rel=1e-2)
+
+
+@pytest.mark.parametrize("people", [2, 5, 20, 100, 500])
+def test_estimate_people_recovers_simulated_people(people):
+    random = np.random.default_rng(people)
+    estimates = []
+    for _ in range(300):
+        fingerprints = random.choice(len(ZIPF_P), size=people, p=ZIPF_P)
+        estimates.append(estimate_people(len(set(fingerprints)), ZIPF_P))
+    assert np.mean(estimates) == pytest.approx(people, rel=0.05)
