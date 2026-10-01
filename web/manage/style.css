@@ -170,7 +170,8 @@ mark { background: var(--mark); color: inherit; }
 .days7 span { text-align: center; font-size: 11px; color: var(--muted); padding-bottom: 4px; }
 .cols-head, .cols { display: grid; grid-template-columns: repeat(3, 56px); gap: 4px; }
 .cols-head span { text-align: center; font-size: 11px; color: var(--muted); padding-bottom: 6px; }
-.col { height: 224px; overflow-y: auto; scrollbar-width: thin; display: flex; flex-direction: column; }
+.col { height: 224px; overflow-y: auto; scrollbar-width: none; display: flex; flex-direction: column; }
+.col::-webkit-scrollbar { display: none; }
 .col button { flex: none; height: 32px; width: 100%; }
 .pop-foot { display: flex; justify-content: space-between; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
 .pop .pop-foot button { height: auto; padding: 6px 10px; font-size: 13px; }
