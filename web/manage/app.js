@@ -686,7 +686,7 @@ async function pollView(id, g) {
   const draft = p.status === 'draft', final = p.status === 'final';
   main.innerHTML = `<a class="mono small muted" href="#/">← все опросы</a>
   <div class="head" style="margin-top:32px"><h1>${esc(p.question)}</h1><span id="st">${badge(p)}</span></div>
-  ${draft || final ? '' : '<p class="notice" id="notice"></p><div class="actions" id="finrow"><button class="ghost" id="fin">Завершить досрочно</button></div>'}
+  ${draft || final ? '' : '<p class="notice" id="notice"></p><div class="actions" id="finrow"><button class="ghost" id="fin">Завершить досрочно</button></div><div class="actions" id="cancelrow"><button class="ghost" id="cancel">Отменить запуск</button></div>'}
   ${draft ? `<div class="actions"><button id="act">Запустить</button>
     <a class="btn ghost" href="#/p/${esc(p.id)}/edit">Изменить</a><button class="ghost" id="del">Удалить</button></div>` : ''}
   ${final ? '' : shareHtml(pub)}
@@ -705,6 +705,14 @@ async function pollView(id, g) {
       route();
     };
   }
+  const cancel = $('#cancel');
+  if (cancel) cancel.onclick = async () => {
+    if (!await sure(g, 'Отменить запуск?', 'Опрос вернётся в черновик, страница голосования закроется. Его можно будет изменить, удалить или запустить снова.', 'Вернуть в черновик')) return;
+    cancel.disabled = true;
+    try { await api('POST', `/polls/${p.id}/cancel`); toast('Запуск отменён, опрос снова черновик.', true); }
+    catch (e) { if (e.status === 401) return; toast(e.status === 409 ? 'Не удалось отменить: голосование уже началось.' : e.message); }
+    route();
+  };
   if (del) del.onclick = () => remove(p, del, g);
   // Туннель закрыт — при запуске предупреждаем и об интернете: «Да» открывает туннель, «Нет» оставляет опрос в локальной сети.
   if (act) act.onclick = async () => {
@@ -731,17 +739,19 @@ async function pollView(id, g) {
   if (!draft) loop(p, g);
 }
 
-// Плашка и кнопка «Завершить досрочно» у запущенного опроса. finish принимается только внутри окна
-// (window_start ≤ сейчас < window_end), поэтому кнопку показываем только тогда.
+// Плашка и кнопки запущенного опроса. До начала окна — «Отменить запуск» (cancel), внутри окна
+// (window_start ≤ сейчас < window_end) — «Завершить досрочно» (finish); сервер принимает их только тогда.
 function live(p, status) {
   if (!$('#notice')) return;
   const now = Date.now(), start = new Date(p.window_start), can = status === 'active' && now >= start && now < new Date(p.window_end);
   // время начала: сегодня — только часы, иначе с датой; секунды — если они есть
   const at = start.toLocaleTimeString('ru-RU', { timeZone: TZ, hour: '2-digit', minute: '2-digit', ...(wall(start).second && { second: '2-digit' }) });
   const day = dayKey(start) === dayKey(new Date()) ? 'в ' : start.toLocaleDateString('ru-RU', { timeZone: TZ, day: 'numeric', month: 'long' }) + ' в ';
-  $('#notice').textContent = phase(p, status) === 'planned' ? `Опрос запланирован: голосование начнётся ${day}${at}. Изменить или удалить его нельзя.`
+  const planned = phase(p, status) === 'planned';
+  $('#notice').textContent = planned ? `Опрос запланирован: голосование начнётся ${day}${at}. Чтобы изменить или удалить его, отмените запуск.`
     : 'Опрос запущен: изменить или удалить его нельзя' + (can ? ', но можно завершить досрочно.' : ' до завершения.');
   $('#finrow').hidden = !can;
+  $('#cancelrow').hidden = !planned;
 }
 
 // ---------- аналитика: раз в секунду, пока не final ----------

@@ -61,7 +61,8 @@ select id, question, type, status, window_start, window_end, grace_s, created_at
        ) as options
   from polls
 """
-POLL_DATA_TABLES = ("options", "results", "stage_progress", "fp_counts", "timeline", "stage2_stats")
+COUNTING_TABLES = ("results", "stage_progress", "fp_counts", "timeline", "stage2_stats")
+POLL_DATA_TABLES = ("options", *COUNTING_TABLES)
 IP_BUCKETS = ["1", "2-10", "11-100", "101+"]
 FIXED_ARRIVAL_MODEL = {"median_s": 14, "sigma": 0.5}
 
@@ -227,6 +228,35 @@ def finish_poll(poll_id: uuid.UUID):
             """,
             (poll_id,),
         )
+
+
+@app.post("/admin/polls/{poll_id}/cancel")
+def cancel_poll(poll_id: uuid.UUID):
+    with connect() as conn:
+        poll = update_poll_or_409(
+            conn,
+            poll_id,
+            """
+            update polls
+               set status = 'draft',
+                   salt = null
+             where id = %s
+               and status = 'active'
+               and now() < window_start
+            returning id
+            """,
+            (poll_id,),
+        )
+        for table in COUNTING_TABLES:
+            conn.execute(
+                f"""
+                delete from {table}
+                 where poll_id = %s
+                """,
+                (poll_id,),
+            )
+    shutil.rmtree(Path(WEB_ROOT, "p", str(poll_id)), ignore_errors=True)
+    return poll
 
 
 @app.delete("/admin/polls/{poll_id}", status_code=204)

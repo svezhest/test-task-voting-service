@@ -1,5 +1,6 @@
 import datetime as dt
 import time
+import uuid
 
 import pytest
 
@@ -137,3 +138,22 @@ def test_delete_final(admin, viewer, make_poll, vote, wait_final):
     while (code := vote(pid, [0]).status_code) != 404 and time.time() < deadline:
         time.sleep(0.5)
     assert code == 404
+
+
+def test_cancel_planned_returns_to_draft(admin, viewer, make_poll, vote):
+    p = make_poll(start_in=60, window_s=10)
+    r = admin.post(f"/admin/polls/{p['id']}/cancel", headers=AUTH)
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "draft"
+    assert viewer.get(f"/p/{p['id']}/config.json").status_code == 404
+    assert admin.patch(f"/admin/polls/{p['id']}", json={"question": "Новый вопрос?"}, headers=AUTH).status_code == 200
+    assert admin.post(f"/admin/polls/{p['id']}/activate", headers=AUTH).status_code == 200
+    assert viewer.get(f"/p/{p['id']}/config.json").json()["question"] == "Новый вопрос?"
+
+
+def test_cancel_running_or_draft_is_409(admin, make_poll):
+    running = make_poll()
+    assert admin.post(f"/admin/polls/{running['id']}/cancel", headers=AUTH).status_code == 409
+    draft = make_poll(active=False)
+    assert admin.post(f"/admin/polls/{draft['id']}/cancel", headers=AUTH).status_code == 409
+    assert admin.post(f"/admin/polls/{uuid.uuid4()}/cancel", headers=AUTH).status_code == 404
