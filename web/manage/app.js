@@ -549,23 +549,13 @@ function parseDuration(text) {
 }
 const WEEKDAYS = ['пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс'];
 
-// Открыто не больше одного окошка выбора. Закрывается кликом мимо него и его поля, Esc, переходом по Tab на другое поле
-// или открытием другого окошка. Клик мимо ловим на document после самого клика: если закрывать на нажатии, страница,
-// которую окошко удлиняло, укоротится, кнопка уедет из-под мыши и клик потеряется.
-// По той же причине окошко, закрытое при нажатой кнопке мыши (например, переходом на другое поле), прячем после отпускания.
+// Открыто не больше одного окошка выбора. Закрывается сразу: кликом мимо него и его поля, Esc, переходом на другое поле
+// или открытием другого окошка.
 let openPicker = null;   // {pop, area}: окошко и обёртка его поля
-let pointerIsDown = false;
-const hideAfterPointer = [];
-const hidePop = pop => { if (pointerIsDown) hideAfterPointer.push(pop); else pop.hidden = true; };
-const closePicker = () => { if (openPicker) hidePop(openPicker.pop); openPicker = null; };
-document.addEventListener('pointerdown', () => pointerIsDown = true, true);
-document.addEventListener('pointerup', () => {
-  pointerIsDown = false;
-  setTimeout(() => { for (const pop of hideAfterPointer.splice(0)) if (openPicker?.pop !== pop) pop.hidden = true; });   // уже после click
-}, true);
+const closePicker = () => { if (openPicker) openPicker.pop.hidden = true; openPicker = null; };
 // composedPath, а не contains: кнопку месяца календарь перерисовывает, и к этому моменту она уже вне документа
 document.addEventListener('click', e => { if (openPicker && !e.composedPath().includes(openPicker.area)) closePicker(); });
-document.addEventListener('focusin', e => { if (openPicker && !pointerIsDown && !openPicker.area.contains(e.target)) closePicker(); });
+document.addEventListener('focusin', e => { if (openPicker && !openPicker.area.contains(e.target)) closePicker(); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closePicker(); });
 
 // Окошко под полем открывается по фокусу или клику. Кнопки окошка не забирают фокус у поля (mousedown без действия по умолчанию).
@@ -575,6 +565,7 @@ function attachPicker(input) {
   pop.hidden = true;
   input.after(pop);
   pop.onmousedown = e => e.preventDefault();
+  pop.onclick = e => e.preventDefault();   // иначе клик по пустому месту окошка дойдёт до <label> «Начало» и откроет календарь первого поля
   let shown = null;   // месяц календаря {year, month}
   const draw = () => input.dataset.pick === 'date' ? drawCalendar() : drawClock();
 
@@ -660,6 +651,8 @@ function attachPicker(input) {
   };
   input.addEventListener('focus', open);
   input.addEventListener('click', open);
+  // Tab уходит на следующее поле, а не в кнопки окошка: окошко — для мыши, с клавиатуры время печатают
+  input.addEventListener('keydown', e => { if (e.key === 'Tab') closePicker(); });
   input.addEventListener('input', () => {
     shown = null;
     if (pop.hidden) return;

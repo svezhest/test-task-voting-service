@@ -263,7 +263,9 @@ svg .hit:hover { fill: var(--fg); fill-opacity: .06; }
   .funnel { grid-template-columns: 110px 1fr 80px; font-size: 14px; }
   .why { grid-template-columns: 1fr 80px; }
   .list th:nth-child(3), .list td:nth-child(3) { display: none; }
+  header { flex-wrap: wrap; gap: 8px 24px; }
   nav { gap: 16px; white-space: nowrap; }
+  .pick + .pick .pop { left: auto; right: 0; }   /* окошко времени — от правого края поля, иначе вылезает за экран */
   .cal { padding: 20px 16px 24px; }
   .cal-in { margin: 0; }
   #reset { width: 100%; }
