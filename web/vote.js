@@ -56,10 +56,13 @@ function show(title, note, choice) {
   $('msg').hidden = false;
 }
 
-// STUB: окно (window_start, window_end, grace_s) на клиенте не проверяем — это решает приём (410).
+// Окно (window_start, window_end, grace_s) для голоса на клиенте не проверяем — это решает приём (410).
+// По окну только ограничиваем повторы отправки.
+var pollConfig = null;
 fetch('/p/' + encodeURIComponent(pollId) + '/config.json')
   .then(function (r) { if (!r.ok) throw r.status; return r.json(); })
   .then(function (cfg) {
+    pollConfig = cfg;
     $('q').textContent = cfg.question;
     document.title = cfg.question;
     var saved;
@@ -94,7 +97,11 @@ $('form').onsubmit = async function (e) {
   var body = JSON.stringify({ poll_id: pollId, options: options, voter_id: voterId, fp: await fpPromise });
 
   // Сетевая ошибка и любой 5xx (503 — приём перегружен, 502/504 — упал узел приёма, 52x/530 — Cloudflare не достучался
-  // до стенда): повтор с тем же телом и voter_id, экспоненциальная задержка с полным разбросом, пока вкладка открыта.
+  // до стенда): повтор с тем же телом и voter_id, экспоненциальная задержка с полным разбросом.
+  // Повторяем, пока голосование может идти: до конца окна с задержкой (+10 с на расхождение часов), но не меньше 15 с.
+  // Дальше повторять незачем — голос всё равно не примут.
+  var windowCloses = Date.parse(pollConfig.window_end) + pollConfig.grace_s * 1000 + 10000;
+  var retryUntil = Math.max(windowCloses, Date.now() + 15000);
   // STUB: база 0.5 с и потолок 30 с в docs не заданы.
   var code;
   for (var n = 0; ; n++) {
@@ -106,8 +113,10 @@ $('form').onsubmit = async function (e) {
       code = 0;
     }
     if (code !== 0 && code < 500) break;
+    if (Date.now() > retryUntil) break;
     status(code === 503 ? 'Сервер занят, пробуем ещё раз…' : 'Нет связи с сервером голосования, пробуем ещё раз…');
-    await new Promise(function (r) { setTimeout(r, Math.random() * Math.min(30000, 500 * Math.pow(2, n))); });
+    var pause = Math.random() * Math.min(30000, 500 * Math.pow(2, n));
+    await new Promise(function (r) { setTimeout(r, Math.min(pause, Math.max(0, retryUntil - Date.now()))); });
   }
 
   if (code === 204) {
@@ -123,5 +132,7 @@ $('form').onsubmit = async function (e) {
   // 422 и прочие ошибки — даём выбрать и отправить снова.
   // STUB: 400 в docs для клиента не описан: без повтора, форма снова доступна.
   $('f').disabled = false;
-  status(code === 422 ? 'Этот выбор не принят. Выберите заново.' : 'Не получилось отправить. Попробуйте ещё раз.');
+  if (code === 422) return status('Этот выбор не принят. Выберите заново.');
+  if (code === 0 || code >= 500) return status('Голос не отправлен: нет связи с сервером голосования. Попробуйте ещё раз.');
+  status('Не получилось отправить. Попробуйте ещё раз.');
 };
