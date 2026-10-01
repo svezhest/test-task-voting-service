@@ -86,7 +86,6 @@ def test_create_422(admin, kw):
     assert_422_detail_list(admin.post("/admin/polls", json=body(**kw), headers=AUTH))
 
 
-@pytest.mark.skip(reason="Вопрос: вопрос из одних пробелов — 422? В api.md «пробелы не считаются» сказано про варианты.")
 def test_create_blank_question_422(admin):
     assert_422_detail_list(admin.post("/admin/polls", json=body(question="   "), headers=AUTH))
 
