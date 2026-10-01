@@ -139,6 +139,7 @@ function login(msg) {
     // пароль уходит в заголовок: не-ASCII (русская раскладка) fetch не отправит
     if (!/^[\x20-\x7e]+$/.test(t)) return toast('Пароль не подошёл: проверьте раскладку клавиатуры.');
     localStorage.setItem(KEY, token = t);
+    $('#toast').hidden = true;   // «проверьте раскладку» от прошлой попытки не висит над открывшейся админкой
     route();
   };
 }
@@ -343,7 +344,11 @@ function apply(polls) {
       <td class="mono small muted when-cell">${when(p.window_start)}</td></tr>`;
     }).join('')}</tbody></table>${pages > 1 ? pager(pages, from, shown.length) : ''}`
     : '<div class="empty"><p>Ничего не нашлось.</p><p class="muted small">Попробуйте другое слово или сбросьте фильтры.</p></div>';
-  main.querySelectorAll('tr[data-id]').forEach(tr => tr.onclick = () => location.hash = '#/p/' + tr.dataset.id);
+  main.querySelectorAll('tr[data-id]').forEach(tr => tr.onclick = e => {
+    // Ctrl/Cmd-клик по ссылке открывает новую вкладку сам; клик по ссылке и выделение текста — не переход по строке
+    if (e.target.closest('a') || getSelection().toString()) return;
+    location.hash = '#/p/' + tr.dataset.id;
+  });
   // к новой странице — с её начала, если начало списка ушло за верх экрана
   main.querySelectorAll('.pages [data-p]').forEach(b => b.onclick = () => {
     page = +b.dataset.p; apply(polls);
@@ -425,12 +430,14 @@ function formView(p) {
       <label><span>Начало</span><div class="when">${whenFields('ws', start)}</div></label>
       <div class="end-field">
         <div class="end-head"><button type="button" class="link" data-end="after">Длительность</button><button type="button" class="link" data-end="at">Время остановки</button></div>
-        <div data-end-mode="after"><input name="wdur" inputmode="numeric" placeholder="ММ:СС" autocomplete="off" value="${durationText((end - start) / 1000)}">
+        <div data-end-mode="after"><input name="wdur" placeholder="ММ:СС" autocomplete="off" value="${durationText((end - start) / 1000)}">
           <div class="quick">${QUICK_DURATIONS.map(([sec, label]) => `<button type="button" class="ghost" data-duration="${sec}">${label}</button>`).join('')}</div>
           <p class="muted small" id="end-at"></p></div>
         <div data-end-mode="at" hidden><div class="when">${whenFields('we', end)}</div></div>
       </div>
-      <label title="Сколько секунд после конца ещё принимать голоса: у части зрителей трансляция отстаёт."><span>Задержка, секунд</span><input type="number" name="grace" value="${p ? p.grace_s : 60}"></label>
+      <label title="Сколько секунд после конца ещё принимать голоса: у части зрителей трансляция отстаёт."><span>Задержка, секунд</span><div class="stepper"><input type="number" name="grace" min="0" value="${p ? p.grace_s : 60}"><span class="steps">
+        <button type="button" data-delta="1" aria-label="Больше"><svg viewBox="0 0 10 6"><polyline points="1,5 5,1 9,5"/></svg></button>
+        <button type="button" data-delta="-1" aria-label="Меньше"><svg viewBox="0 0 10 6"><polyline points="1,1 5,5 9,1"/></svg></button></span></div></label>
     </div></fieldset>
     <div class="actions">
       <button>${p ? 'Сохранить' : 'Создать черновик'}</button>
@@ -439,8 +446,16 @@ function formView(p) {
   </form>`;
   const form = $('#nf'), opts = $('#opts');
   form.elements.question.value = p ? p.question : '';
+  // поле вопроса растёт по тексту: без ручного растягивания и без полосы прокрутки
+  const fit = () => { const q = form.elements.question; q.style.height = 'auto'; q.style.height = q.scrollHeight + 2 + 'px'; };
+  form.elements.question.addEventListener('input', fit);
+  fit();
   form.elements.type.value = p ? p.type : 'single';
   form.querySelectorAll('[data-pick]').forEach(attachPicker);
+  form.querySelectorAll('[data-delta]').forEach(b => b.onclick = () => {
+    const grace = form.elements.grace;
+    if (b.dataset.delta > 0) grace.stepUp(); else grace.stepDown();
+  });
 
   // Конец окна: длительность от начала или время остановки. При переключении одно пересчитывается в другое.
   let endMode = 'after';
@@ -529,8 +544,8 @@ function formView(p) {
 
 // ---------- выбор даты и времени: свой, в поясе TZ; поле остаётся текстовым ----------
 
-const whenFields = (name, d) => `<span class="pick"><input name="${name}d" data-pick="date" inputmode="numeric" placeholder="ДД.ММ.ГГГГ" autocomplete="off" value="${dateText(d)}"></span>`
-  + `<span class="pick"><input name="${name}t" data-pick="time" inputmode="numeric" placeholder="ЧЧ:ММ:СС" autocomplete="off" value="${timeText(d)}"></span>`;
+const whenFields = (name, d) => `<span class="pick"><input name="${name}d" data-pick="date" inputmode="decimal" placeholder="ДД.ММ.ГГГГ" autocomplete="off" value="${dateText(d)}"></span>`
+  + `<span class="pick"><input name="${name}t" data-pick="time" placeholder="ЧЧ:ММ:СС" autocomplete="off" value="${timeText(d)}"></span>`;
 const QUICK_DURATIONS = [[60, '1 мин'], [300, '5 мин'], [600, '10 мин']];
 // длительность в секундах -> «01:30» или «1:05:00»
 const durationText = seconds => {
@@ -646,8 +661,12 @@ function attachPicker(input) {
     closePicker();
     openPicker = { pop, area: input.parentElement };
     shown = null;
-    pop.hidden = false;   // сначала показать: прокрутка работает только у видимого
+    // Окошко не должно удлинять страницу, иначе его закрытие сдвинет её под курсором: снизу нет места — открываем вверх.
+    const pageBottom = document.documentElement.scrollHeight;
+    pop.classList.remove('up');
+    pop.hidden = false;   // сначала показать: прокрутка столбцов и размер работают только у видимого
     draw();
+    pop.classList.toggle('up', input.getBoundingClientRect().bottom + scrollY + 4 + pop.offsetHeight > pageBottom);
   };
   input.addEventListener('focus', open);
   input.addEventListener('click', open);
@@ -671,11 +690,12 @@ function dialog(title, texts, buttons) {
         `<button value="${v}" class="${cls}"${i === buttons.length - 1 ? ' autofocus' : ''}>${esc(label)}</button>`).join('')}</form>`;
     document.body.append(d);
     d.onclose = () => { d.remove(); resolve(d.returnValue); };
-    // клик мимо окна — как Esc: закрыть, ничего не выбрав
+    // клик мимо окна — как Esc: закрыть, ничего не выбрав. Второй клик двойного (e.detail 2) — нет: двойной клик по кнопке,
+    // открывшей окно, иначе тут же закрывал его
     d.onclick = e => {
       const box = d.getBoundingClientRect();
       const outside = e.clientX < box.left || e.clientX > box.right || e.clientY < box.top || e.clientY > box.bottom;
-      if (e.target === d && outside) d.close('');
+      if (e.target === d && outside && e.detail < 2) d.close('');
     };
     d.showModal();
   });
@@ -813,6 +833,8 @@ async function loop(p, g) {
     const [res, an] = await Promise.all([api('GET', `/polls/${p.id}/results`), api('GET', `/polls/${p.id}/analytics`)]);
     if (g !== gen) return;
     final = res.status === 'final';
+    // запуск отменили в другой вкладке: перерисовать черновиком
+    if (res.status === 'draft') return route();
     // опрос завершился у нас на глазах: перерисовать карточку целиком — без ссылки, с кнопкой «Удалить»
     if (final && p.status !== 'final') return route();
     $('#st').innerHTML = badge(p, res.status);
@@ -820,6 +842,7 @@ async function loop(p, g) {
     $('#an').innerHTML = final ? finalHtml(res, an, p) : liveHtml(res, an, p);
   } catch (e) {
     if (e.status === 401 || g !== gen) return;
+    if (e.status === 404) return route();   // удалили в другой вкладке: карточка покажет «Опрос не найден»
     toast('Не удалось обновить данные. Пробуем ещё раз.');
   }
   if (!final && g === gen) timer = setTimeout(() => loop(p, g), 1000);
