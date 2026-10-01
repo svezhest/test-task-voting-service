@@ -63,3 +63,10 @@ create table stage2_stats (
     last_offset bigint not null,
     primary key (poll_id, partition)
 );
+
+-- the admin password once changed in the admin (until then ADMIN_TOKEN); the admin also creates it on an older stand
+create table admin_password (
+    id   smallint primary key check (id = 1),
+    salt bytea not null,
+    hash bytea not null
+);

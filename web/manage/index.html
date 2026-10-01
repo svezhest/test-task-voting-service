@@ -12,11 +12,14 @@
   <nav>
     <a href="#/">опросы</a>
     <a href="#/new">новый опрос</a>
-    <label class="net" title="Страница голосования открыта из интернета через Cloudflare-туннель. Админка — только на этом компьютере.">
-      <input type="checkbox" id="net">из интернета</label>
+    <a href="#/password">пароль</a>
     <button id="out" class="link">выйти</button>
   </nav>
 </header>
+<div class="subbar">
+  <label class="net" title="Страница голосования открыта из интернета через Cloudflare-туннель. Админка — только на этом компьютере.">
+    <input type="checkbox" id="net">доступ в сеть</label>
+</div>
 <main id="main"></main>
 <div id="toast" class="toast" role="alert" hidden></div>
 <script src="/vendor/qrcode.js"></script>

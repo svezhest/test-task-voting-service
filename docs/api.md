@@ -56,7 +56,7 @@ draft ──activate──► active ──конец окна + допуск─
 
 ## Админка
 
-Все запросы с заголовком `Authorization: Bearer <токен>`, иначе `401`.
+Все запросы с заголовком `Authorization: Bearer <пароль>`, иначе `401`. Пароль — `ADMIN_TOKEN`, пока его не сменили в админке; после смены — scrypt-хэш в таблице `admin_password`, и `ADMIN_TOKEN` больше не действует.
 
 Тело `POST /admin/polls` (время — ISO 8601 с часовым поясом, `Z` или `+03:00`; без пояса — `422`):
 
@@ -88,6 +88,7 @@ draft ──activate──► active ──конец окна + допуск─
 | `DELETE /admin/polls/{id}` | Удалить опрос. |
 | `GET /admin/polls` | Список опросов. |
 | `GET /admin/public-url` | Адреса, по которым стенд виден с телефона. |
+| `PUT /admin/password` | Сменить пароль: `{"current", "new"}` → `204`; неверный текущий — `403`; новый не из 8–128 печатных ASCII без пробелов — `422`. |
 | `GET /admin/timezone` | Часовой пояс компьютера со стендом: `{"timezone": "Europe/Moscow" \| null}`. |
 | `POST /admin/tunnel`, `DELETE /admin/tunnel` | Открыть и закрыть страницу голосования из интернета. |
 | `GET /admin/polls/{id}` | Опрос. |

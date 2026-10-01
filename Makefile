@@ -15,7 +15,7 @@ up:
 			|| t="туннель не поднялся, попробуйте флажком в админке";; \
 		*) t=$$(curl -sf -H "Authorization: Bearer $$ADMIN_TOKEN" localhost:8091/admin/public-url | grep -o 'https://[^"]*') \
 			&& t="$$t (открыт раньше, закрыть можно флажком в админке)" || t="закрыт, открыть можно флажком в админке";; esac; \
-	echo "Админка: http://localhost:8091/manage/ (токен: $$ADMIN_TOKEN)"; \
+	echo "Админка: http://localhost:8091/manage/ (пароль: $$ADMIN_TOKEN, если не меняли в админке)"; \
 	echo "Зрители через интернет: $$t"; \
 	echo "Зрители в локальной сети: $${HOST_LAN_IP:+http://$$HOST_LAN_IP:8090}"
 

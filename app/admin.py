@@ -13,16 +13,19 @@ from fastapi.exceptions import RequestValidationError
 from psycopg.rows import dict_row
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from app.config import ADMIN_TOKEN, DATABASE_URL, HOST_LAN_IP, HOST_TZ, WEB_ROOT
+from app.config import DATABASE_URL, HOST_LAN_IP, HOST_TZ, WEB_ROOT
+from app.password import AdminPassword
 from app.tunnel import CloudflareTunnel
 
 
-def check_token(authorization: str = Header("")):
-    if authorization != f"Bearer {ADMIN_TOKEN}":
+def check_token(request: Request, authorization: str = Header("")):
+    scheme, _, password = authorization.partition(" ")
+    if scheme != "Bearer" or not request.app.state.password.check(password):
         raise HTTPException(401)
 
 
 app = FastAPI(dependencies=[Depends(check_token)])
+app.state.password = AdminPassword()
 app.state.tunnel = CloudflareTunnel()
 
 
@@ -296,6 +299,22 @@ def public_url(request: Request):
     if HOST_LAN_IP:
         lan_url = f"http://{HOST_LAN_IP}:8090"
     return {"tunnel": request.app.state.tunnel.url(), "lan": lan_url}
+
+
+Password = Annotated[str, Field(min_length=8, max_length=128, pattern=r"^[\x21-\x7e]+$")]  # goes into a header: ASCII
+
+
+class PasswordChange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    current: str
+    new: Password
+
+
+@app.put("/admin/password", status_code=204)
+def change_password(change: PasswordChange, request: Request):
+    if not request.app.state.password.check(change.current):
+        raise HTTPException(403)
+    request.app.state.password.change(change.new)
 
 
 @app.get("/admin/timezone")

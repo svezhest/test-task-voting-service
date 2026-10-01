@@ -153,3 +153,19 @@ def test_patch_end_before_stored_start_422(admin):
 def test_activate_twice_409(admin, make_poll):
     p = make_poll()  # уже активирован
     assert admin.post(f"/admin/polls/{p['id']}/activate", headers=AUTH).status_code == 409
+
+
+def test_change_password(admin):
+    current = AUTH["Authorization"].removeprefix("Bearer ")
+    new = "test-pass-" + uuid.uuid4().hex[:8]
+    body = {"current": current, "new": new}
+    try:
+        assert admin.put("/admin/password", json={"current": "wrong-pass", "new": new}, headers=AUTH).status_code == 403
+        assert admin.put("/admin/password", json={"current": current, "new": "short"}, headers=AUTH).status_code == 422
+        assert admin.put("/admin/password", json=body, headers=AUTH).status_code == 204
+        assert admin.get("/admin/polls", headers=AUTH).status_code == 401
+        assert admin.get("/admin/polls", headers={"Authorization": f"Bearer {new}"}).status_code == 200
+    finally:
+        restore = {"current": new, "new": current}
+        admin.put("/admin/password", json=restore, headers={"Authorization": f"Bearer {new}"})
+    assert admin.get("/admin/polls", headers=AUTH).status_code == 200

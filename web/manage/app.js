@@ -12,7 +12,7 @@ const num = n => n == null ? '—' : Number(n).toLocaleString('ru-RU');
 const short = n => new Intl.NumberFormat('ru-RU', { notation: 'compact', maximumFractionDigits: 1 }).format(n);
 const pct = x => x == null ? '—' : (x * 100).toFixed(1).replace('.', ',') + '%';
 const dt = s => new Date(s).toLocaleString('ru-RU', { timeZone: TZ });
-const when = s => new Date(s).toLocaleString('ru-RU', { timeZone: TZ, day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' });
+const when = s => { const d = new Date(s); return `${dateText(d)} ${timeText(d).slice(0, 5)}`; };   // «01.10.2026 16:21»: одна ширина у всех строк
 const STATUS = { draft: 'Черновик', planned: 'Запланирован', active: 'Идёт голосование', counting: 'Подсчёт', final: 'Готово' };
 const TYPE = { single: 'Один вариант ответа', multi: 'Несколько вариантов ответа' };
 // Показываемый статус считаем из status и часов: active до начала окна — «Запланирован»,
@@ -93,7 +93,7 @@ async function api(method, path, body) {
       body: body && JSON.stringify(body),
     });
   } catch { throw new Error('Нет связи с сервером. Попробуйте ещё раз.'); }
-  if (r.status === 401) { logout('Токен не подошёл. Введите заново.'); throw Object.assign(new Error('401'), { status: 401 }); }
+  if (r.status === 401) { logout('Пароль не подошёл. Введите заново.'); throw Object.assign(new Error('401'), { status: 401 }); }
   const data = await r.json().catch(() => null);
   if (!r.ok) throw Object.assign(new Error(errText(r.status, data)), { status: r.status });
   return data;
@@ -128,16 +128,16 @@ function login(msg) {
   document.body.classList.add('anon');
   main.innerHTML = `<section class="narrow">
     <h1>Вход</h1>
-    <p class="muted">${esc(msg || 'Токен администратора.')}</p>
-    <form id="lf"><input id="tok" type="password" autocomplete="off" placeholder="токен"><button>Войти</button></form>
+    <p class="muted">${esc(msg || 'Пароль администратора.')}</p>
+    <form id="lf"><input id="tok" type="password" autocomplete="current-password" placeholder="пароль"><button>Войти</button></form>
   </section>`;
   $('#tok').focus();
   $('#lf').onsubmit = e => {
     e.preventDefault();
     const t = $('#tok').value.trim();
-    if (!t) return toast('Введите токен.');
-    // токен уходит в заголовок: не-ASCII (русская раскладка) fetch не отправит
-    if (!/^[\x20-\x7e]+$/.test(t)) return toast('Токен не подошёл: проверьте раскладку клавиатуры.');
+    if (!t) return toast('Введите пароль.');
+    // пароль уходит в заголовок: не-ASCII (русская раскладка) fetch не отправит
+    if (!/^[\x20-\x7e]+$/.test(t)) return toast('Пароль не подошёл: проверьте раскладку клавиатуры.');
     localStorage.setItem(KEY, token = t);
     route();
   };
@@ -199,7 +199,10 @@ async function route() {
   document.body.classList.remove('anon');
   syncNet();
   const m = location.hash.match(/^#\/p\/([^/]+)(\/edit)?$/);
-  const view = m ? (m[2] ? editView(m[1], g) : pollView(m[1], g)) : location.hash === '#/new' ? formView() : listView(g);
+  const view = m ? (m[2] ? editView(m[1], g) : pollView(m[1], g))
+    : location.hash === '#/new' ? formView()
+    : location.hash === '#/password' ? passwordView()
+    : listView(g);
   Promise.resolve(view).catch(e => {
     if (e.status !== 401 && g === gen) { main.innerHTML = '<p class="muted">Не удалось загрузить страницу.</p>'; toast(e.message); }
   });
@@ -337,7 +340,7 @@ function apply(polls) {
       <td><a href="#/p/${esc(p.id)}">${hl(p.question, q)}</a>
         <div class="opts">${opts.map(o => hl(o.label, q)).join('<span> · </span>')}</div></td>
       <td>${badge(p)}</td>
-      <td class="mono small muted">${when(p.window_start)}</td></tr>`;
+      <td class="mono small muted when-cell">${when(p.window_start)}</td></tr>`;
     }).join('')}</tbody></table>${pages > 1 ? pager(pages, from, shown.length) : ''}`
     : '<div class="empty"><p>Ничего не нашлось.</p><p class="muted small">Попробуйте другое слово или сбросьте фильтры.</p></div>';
   main.querySelectorAll('tr[data-id]').forEach(tr => tr.onclick = () => location.hash = '#/p/' + tr.dataset.id);
@@ -359,6 +362,40 @@ function pager(n, from, total) {
     <div class="pages">${btn(page - 1, '←', 'Предыдущая страница')}${nums.map(i => !i ? '<span>…</span>'
       : i === page ? `<button class="on" aria-current="page">${i}</button>` : btn(i, i, 'Страница ' + i)).join('')}${btn(page + 1, '→', 'Следующая страница')}</div>
     <p class="mono muted">${num(from + 1)}–${num(Math.min(from + PER, total))} из ${num(total)}</p></div>`;
+}
+
+// ---------- смена пароля ----------
+
+function passwordView() {
+  main.innerHTML = `<div class="head"><h1>Пароль</h1></div>
+  <form id="pf" class="form narrow" novalidate>
+    <label><span>Текущий пароль</span><input name="current" type="password" autocomplete="current-password"></label>
+    <label><span>Новый пароль</span><input name="new" type="password" autocomplete="new-password"></label>
+    <label><span>Новый пароль ещё раз</span><input name="repeat" type="password" autocomplete="new-password"></label>
+    <p class="muted small">Не короче 8 символов, латиница, цифры и знаки, без пробелов.</p>
+    <div class="actions"><button>Сменить пароль</button><a class="btn ghost" href="#/">Отмена</a></div>
+  </form>`;
+  const form = $('#pf');
+  form.elements.current.focus();
+  form.onsubmit = async e => {
+    e.preventDefault();
+    const { current, new: fresh, repeat } = form.elements;
+    if (!current.value) return toast('Введите текущий пароль.');
+    if (!/^[\x21-\x7e]{8,128}$/.test(fresh.value)) return toast('Новый пароль: не короче 8 символов, латиница, цифры и знаки, без пробелов.');
+    if (fresh.value !== repeat.value) return toast('Новые пароли не совпадают.');
+    form.querySelector('button').disabled = true;
+    try {
+      await api('PUT', '/password', { current: current.value, new: fresh.value });
+    } catch (e) {
+      form.querySelector('button').disabled = false;
+      if (e.status === 403) return toast('Текущий пароль не подошёл.');
+      if (e.status !== 401) toast(e.message);
+      return;
+    }
+    localStorage.setItem(KEY, token = fresh.value);
+    toast('Пароль изменён.', true);
+    location.hash = '#/';
+  };
 }
 
 // ---------- создание и правка черновика: одна форма ----------
@@ -393,10 +430,8 @@ function formView(p) {
           <p class="muted small" id="end-at"></p></div>
         <div data-end-mode="at" hidden><div class="when">${whenFields('we', end)}</div></div>
       </div>
-      <label><span>Задержка, секунд</span><input type="number" name="grace" value="${p ? p.grace_s : 60}"></label>
-    </div>
-    <p class="muted small hint">Время по часам этого компьютера: ${esc(TZ)} (${zone(start)}).
-      Задержка — сколько секунд после конца ещё принимать голоса: у части зрителей трансляция отстаёт.</p></fieldset>
+      <label title="Сколько секунд после конца ещё принимать голоса: у части зрителей трансляция отстаёт."><span>Задержка, секунд</span><input type="number" name="grace" value="${p ? p.grace_s : 60}"></label>
+    </div></fieldset>
     <div class="actions">
       <button>${p ? 'Сохранить' : 'Создать черновик'}</button>
       <a class="btn ghost" href="${p ? '#/p/' + esc(p.id) : '#/'}">Отмена</a>
@@ -514,13 +549,26 @@ function parseDuration(text) {
 }
 const WEEKDAYS = ['пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс'];
 
-// Нажата ли сейчас кнопка мыши или палец на экране: окошко выбора прячем только после клика (см. attachPicker).
+// Открыто не больше одного окошка выбора. Закрывается кликом мимо него и его поля, Esc, переходом по Tab на другое поле
+// или открытием другого окошка. Клик мимо ловим на document после самого клика: если закрывать на нажатии, страница,
+// которую окошко удлиняло, укоротится, кнопка уедет из-под мыши и клик потеряется.
+// По той же причине окошко, закрытое при нажатой кнопке мыши (например, переходом на другое поле), прячем после отпускания.
+let openPicker = null;   // {pop, area}: окошко и обёртка его поля
 let pointerIsDown = false;
+const hideAfterPointer = [];
+const hidePop = pop => { if (pointerIsDown) hideAfterPointer.push(pop); else pop.hidden = true; };
+const closePicker = () => { if (openPicker) hidePop(openPicker.pop); openPicker = null; };
 document.addEventListener('pointerdown', () => pointerIsDown = true, true);
-document.addEventListener('pointerup', () => pointerIsDown = false, true);
+document.addEventListener('pointerup', () => {
+  pointerIsDown = false;
+  setTimeout(() => { for (const pop of hideAfterPointer.splice(0)) if (openPicker?.pop !== pop) pop.hidden = true; });   // уже после click
+}, true);
+// composedPath, а не contains: кнопку месяца календарь перерисовывает, и к этому моменту она уже вне документа
+document.addEventListener('click', e => { if (openPicker && !e.composedPath().includes(openPicker.area)) closePicker(); });
+document.addEventListener('focusin', e => { if (openPicker && !pointerIsDown && !openPicker.area.contains(e.target)) closePicker(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closePicker(); });
 
-// Окошко под полем: открывается по фокусу, закрывается, когда поле теряет фокус или по Esc.
-// Кнопки окошка не забирают фокус у поля (mousedown без действия по умолчанию).
+// Окошко под полем открывается по фокусу или клику. Кнопки окошка не забирают фокус у поля (mousedown без действия по умолчанию).
 function attachPicker(input) {
   const pop = document.createElement('div');
   pop.className = 'pop';
@@ -558,7 +606,7 @@ function attachPicker(input) {
     pop.querySelectorAll('[data-day]').forEach(b => b.onclick = () => {
       input.value = `${pad(b.dataset.day)}.${pad(month)}.${year}`;
       input.dispatchEvent(new Event('picked'));
-      pop.hidden = true;
+      closePicker();
     });
   }
 
@@ -566,7 +614,7 @@ function attachPicker(input) {
   function drawClock() {
     const column = (unit, count) => `<div class="col" data-unit="${unit}">${[...Array(count).keys()].map(v =>
       `<button type="button" data-value="${v}">${pad(v)}</button>`).join('')}</div>`;
-    pop.innerHTML = `<div class="cols-head"><span>ч</span><span>мин</span><span>с</span></div>
+    pop.innerHTML = `<p class="pop-zone">${esc(TZ)} · ${zone(new Date())}</p><div class="cols-head"><span>ч</span><span>мин</span><span>с</span></div>
       <div class="cols">${column('hour', 24)}${column('minute', 60)}${column('second', 60)}</div>
       <div class="pop-foot"><button type="button" class="now">Сейчас</button><button type="button" class="done">Готово</button></div>`;
     pop.querySelectorAll('.col button').forEach(b => b.onclick = () => {
@@ -579,7 +627,7 @@ function attachPicker(input) {
       markTime(false);
     });
     pop.querySelector('.now').onclick = () => { input.value = timeText(new Date()); input.dispatchEvent(new Event('picked')); markTime(true); };
-    pop.querySelector('.done').onclick = () => pop.hidden = true;
+    pop.querySelector('.done').onclick = closePicker;
     markTime(true);
   }
 
@@ -602,21 +650,21 @@ function attachPicker(input) {
     });
   }
 
-  const open = () => { shown = null; pop.hidden = false; draw(); };   // сначала показать: прокрутка работает только у видимого
+  const open = () => {
+    if (openPicker?.pop === pop) return;
+    closePicker();
+    openPicker = { pop, area: input.parentElement };
+    shown = null;
+    pop.hidden = false;   // сначала показать: прокрутка работает только у видимого
+    draw();
+  };
   input.addEventListener('focus', open);
-  input.addEventListener('click', () => { if (pop.hidden) open(); });
+  input.addEventListener('click', open);
   input.addEventListener('input', () => {
     shown = null;
     if (pop.hidden) return;
     if (input.dataset.pick === 'date') drawCalendar(); else markTime(true);
   });
-  // Если прятать окошко сразу на нажатии, страница, которую оно удлиняло, укоротится и кнопка уедет из-под мыши,
-  // а клик потеряется. Поэтому при нажатой кнопке прячем после отпускания (setTimeout — уже после click).
-  input.addEventListener('blur', () => {
-    if (!pointerIsDown) { pop.hidden = true; return; }
-    document.addEventListener('pointerup', () => setTimeout(() => { if (document.activeElement !== input) pop.hidden = true; }), { once: true, capture: true });
-  });
-  input.addEventListener('keydown', e => { if (e.key === 'Escape') pop.hidden = true; });
 }
 
 // ---------- своё квадратное окошко подтверждения ----------
