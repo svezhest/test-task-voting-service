@@ -514,6 +514,11 @@ function parseDuration(text) {
 }
 const WEEKDAYS = ['пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс'];
 
+// Нажата ли сейчас кнопка мыши или палец на экране: окошко выбора прячем только после клика (см. attachPicker).
+let pointerIsDown = false;
+document.addEventListener('pointerdown', () => pointerIsDown = true, true);
+document.addEventListener('pointerup', () => pointerIsDown = false, true);
+
 // Окошко под полем: открывается по фокусу, закрывается, когда поле теряет фокус или по Esc.
 // Кнопки окошка не забирают фокус у поля (mousedown без действия по умолчанию).
 function attachPicker(input) {
@@ -605,7 +610,12 @@ function attachPicker(input) {
     if (pop.hidden) return;
     if (input.dataset.pick === 'date') drawCalendar(); else markTime(true);
   });
-  input.addEventListener('blur', () => pop.hidden = true);
+  // Если прятать окошко сразу на нажатии, страница, которую оно удлиняло, укоротится и кнопка уедет из-под мыши,
+  // а клик потеряется. Поэтому при нажатой кнопке прячем после отпускания (setTimeout — уже после click).
+  input.addEventListener('blur', () => {
+    if (!pointerIsDown) { pop.hidden = true; return; }
+    document.addEventListener('pointerup', () => setTimeout(() => { if (document.activeElement !== input) pop.hidden = true; }), { once: true, capture: true });
+  });
   input.addEventListener('keydown', e => { if (e.key === 'Escape') pop.hidden = true; });
 }
 
