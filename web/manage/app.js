@@ -115,6 +115,34 @@ function logout(msg) {
 }
 $('#out').onclick = () => logout();
 
+// ---------- флажок «из интернета»: Cloudflare-туннель на страницу голосования ----------
+
+const netBox = $('#net');
+const syncNet = () => api('GET', '/public-url').then(pub => netBox.checked = !!pub.tunnel, () => {});
+// Открыть или закрыть туннель. Открытие ждёт, пока туннель поднимется (до 30 с).
+async function setNet(on) {
+  netBox.disabled = true;
+  try {
+    if (on) {
+      toast('Открываем страницу голосования из интернета…', true);
+      await api('POST', '/tunnel');
+      toast('Страница голосования открыта из интернета.', true);
+    } else {
+      await api('DELETE', '/tunnel');
+      toast('Доступ из интернета закрыт. Голосовать можно только в локальной сети.', true);
+    }
+  } catch (e) {
+    if (e.status !== 401) toast(e.status === 503 ? 'Не удалось открыть доступ из интернета: туннель не поднялся. Попробуйте ещё раз.' : e.message);
+  }
+  netBox.disabled = false;
+  await syncNet();
+}
+// Карточку опроса перерисовываем: ссылка и QR зависят от туннеля. Форму не трогаем, чтобы не потерять введённое.
+netBox.onchange = async () => {
+  await setNet(netBox.checked);
+  if (/^#\/p\/[^/]+$/.test(location.hash)) route();
+};
+
 // ---------- маршруты: #/  #/new  #/p/{id}  #/p/{id}/edit ----------
 
 function route() {
@@ -122,6 +150,7 @@ function route() {
   clearTimeout(timer);
   if (!token) return login();
   document.body.classList.remove('anon');
+  syncNet();
   const m = location.hash.match(/^#\/p\/([^/]+)(\/edit)?$/);
   const view = m ? (m[2] ? editView(m[1], g) : pollView(m[1], g)) : location.hash === '#/new' ? formView() : listView(g);
   Promise.resolve(view).catch(e => {
@@ -373,18 +402,22 @@ function formView(p) {
 
 // ---------- своё квадратное окошко подтверждения ----------
 
-function ask(title, text, yes, cls = '') {
+// buttons: [[значение, надпись, класс]]; фокус на последней. Esc — пустое значение.
+function dialog(title, texts, buttons) {
   return new Promise(resolve => {
     const d = document.createElement('dialog');
-    d.innerHTML = `<p class="dlg-title">${esc(title)}</p><p>${esc(text)}</p>
-      <form method="dialog" class="actions"><button value="yes" class="${cls}">${esc(yes)}</button><button value="" class="ghost" autofocus>Отмена</button></form>`;
+    d.innerHTML = `<p class="dlg-title">${esc(title)}</p>${texts.map(t => `<p>${esc(t)}</p>`).join('')}
+      <form method="dialog" class="actions">${buttons.map(([v, label, cls = ''], i) =>
+        `<button value="${v}" class="${cls}"${i === buttons.length - 1 ? ' autofocus' : ''}>${esc(label)}</button>`).join('')}</form>`;
     document.body.append(d);
-    d.onclose = () => { d.remove(); resolve(d.returnValue === 'yes'); };
+    d.onclose = () => { d.remove(); resolve(d.returnValue); };
     d.showModal();
   });
 }
+const ask = async (title, text, yes, cls = '') => await dialog(title, [text], [['yes', yes, cls], ['', 'Отмена', 'ghost']]) === 'yes';
 // Если, пока окно открыто, экран сменился (опрос завершился, ушли на другую страницу), действие не выполняем и говорим об этом.
-const sure = async (g, ...a) => await ask(...a) && (g === gen || toast('Пока было открыто окно, страница обновилась. Проверьте опрос и повторите действие.'));
+const stale = g => g === gen || toast('Пока было открыто окно, страница обновилась. Проверьте опрос и повторите действие.');
+const sure = async (g, ...a) => await ask(...a) && stale(g);
 
 async function remove(p, btn, g) {
   if (!await sure(g, 'Удалить опрос?', `«${p.question}» удалится насовсем${p.status === 'final' ? ' вместе с итогами' : ''}. Вернуть его будет нельзя.`, 'Удалить', 'danger')) return;
@@ -458,17 +491,25 @@ async function pollView(id, g) {
     };
   }
   if (del) del.onclick = () => remove(p, del, g);
+  // Туннель закрыт — при запуске предупреждаем и об интернете: «Да» открывает туннель, «Нет» оставляет опрос в локальной сети.
   if (act) act.onclick = async () => {
-    if (!await sure(g, 'Запуск опроса', 'После запуска опрос нельзя изменить или удалить до завершения. Запустить?', 'Запустить')) return;
+    const fixed = 'После запуска опрос нельзя изменить или удалить до завершения.';
+    const how = pub.tunnel ? (await ask('Запуск опроса', fixed + ' Запустить?', 'Запустить') && 'run')
+      : await dialog('Запуск опроса', [fixed,
+          'Страница голосования откроется из интернета через Cloudflare-туннель, чтобы голосовать мог любой телефон. Админка останется только на этом компьютере.'],
+          [['net', 'Да, продолжить'], ['run', 'Нет, только в локальной сети', 'ghost']]);
+    if (!how || !stale(g)) return;
     act.disabled = true;
-    try { await api('POST', `/polls/${p.id}/activate`); }
+    try { await api('POST', `/polls/${p.id}/activate`); toast('Опрос запущен.', true); }
     catch (e) {
       if (e.status === 401) return;
       if (e.status !== 409) { toast(e.message); act.disabled = false; return; }
       // 409 в двух случаях: опрос уже не черновик или время прошло. Различаем, перечитав опрос.
       const q = await api('GET', '/polls/' + p.id).catch(() => null);
       toast(q && q.status !== 'draft' ? 'Опрос уже запущен.' : 'Не удалось запустить: время голосования уже прошло.');
+      return route();
     }
+    if (how === 'net') await setNet(true);
     route();
   };
   // В draft голосов нет — аналитику не спрашиваем.

@@ -1,4 +1,5 @@
 import datetime as dt
+import os
 import sys
 import time
 import uuid
@@ -11,9 +12,9 @@ import pytest
 # Чтобы `import app` работал при запуске pytest из корня репозитория.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-VIEWER = "http://localhost:8090"  # зрительский вход: страница, config.json, /api/
-ADMIN = "http://localhost:8091"   # админский вход: всё то же плюс /admin/ и /manage/
-AUTH = {"Authorization": "Bearer dev-token"}
+VIEWER = "http://localhost:8090"  # зрительский вход: страница, config.json, /api/; IP — адрес соединения
+ADMIN = "http://localhost:8091"   # админский вход: всё то же плюс /admin/ и /manage/; IP голоса задаёт X-Forwarded-For
+AUTH = {"Authorization": f"Bearer {os.environ.get('ADMIN_TOKEN', 'dev-token')}"}
 
 def iso(ts):
     return dt.datetime.fromtimestamp(ts, dt.timezone.utc).isoformat()
@@ -86,7 +87,7 @@ def viewer(admin):
 
 
 @pytest.fixture(scope="session")
-def vote(viewer):
+def vote(admin):  # через админский вход: только там приём верит X-Forwarded-For
     def send(poll_id, options, voter_id=None, fp=None, ip="203.0.113.1", headers=None):
         body = {
             "poll_id": str(poll_id),
@@ -96,7 +97,7 @@ def vote(viewer):
         }
         h = {"X-Forwarded-For": ip} if ip is not None else {}
         h.update(headers or {})
-        return viewer.post("/api/vote", json=body, headers=h)
+        return admin.post("/api/vote", json=body, headers=h)
 
     return send
 
@@ -113,7 +114,7 @@ def activate(admin, viewer):
 
 @pytest.fixture(scope="session")
 def make_poll(admin, activate):
-    def make(labels=("Да", "Нет"), type="single", window_s=10, start_in=0, active=True):
+    def make(labels=("Да", "Нет"), type="single", window_s=15, start_in=0, active=True):
         start = int(time.time()) + start_in
         body = {
             "question": "Тестовый вопрос?",

@@ -87,12 +87,12 @@ async def pass2(db, poll_id, parts, window_s):
             key = (v.ip_hmac, v.fp_hash)
             key_ok = on_key[key] < limits[key]
             ok = key_ok and on_ip[v.ip_hmac] < ceiling
-            # STUB: question — a vote over both limits is counted as rejected by the key limit (checked first, as in the funnel order).
+            # api.md: a vote over both limits is counted in key_limit (checked first)
             rejected_key += not key_ok
             rejected_ip += key_ok and not ok
             on_key[key] += ok
             on_ip[v.ip_hmac] += ok
-            # STUB: votes over the limit are not stored anywhere with a mark, only counted in total.
+            # votes over the limit are only counted in total, not stored
             for idx in [-1] + [i for i in range(v.options.bit_length()) if v.options >> i & 1]:
                 total[idx] += 1
                 counted[idx] += ok

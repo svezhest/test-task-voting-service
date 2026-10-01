@@ -28,8 +28,7 @@ reload_at = 0.0  # when the latest miss reload starts loading (monotonic)
 unknown = {}  # poll_id -> until when a miss does not reload (monotonic): random poll_ids must not load Postgres
 
 
-# STUB: api.md lists polls.config_version, but nothing needs it: ingest re-reads non-draft polls every second
-# (contracts.md), so the column is not created.
+# Ingest re-reads non-draft polls every second (contracts.md).
 # Polls closed more than a day ago are not loaded: 410 is needed only right after the window, later such a poll answers 404.
 async def load_polls():
     global polls, db
@@ -68,8 +67,8 @@ async def lifespan(app):
     global producer
     producer = AIOKafkaProducer(
         bootstrap_servers=os.environ["KAFKA_BOOTSTRAP"], acks="all", enable_idempotence=True, compression_type="lz4",
-        # also the batch expiry: a vote answered 503 does not reach Kafka much later.
-        # STUB: question — with enable_idempotence aiokafka retries retriable errors without expiry, so this is not a hard bound.
+        # also the batch expiry. Not a hard bound: with idempotence aiokafka retries retriable errors, so a vote answered 503
+        # may still reach Kafka later (architecture.md, ingest).
         request_timeout_ms=int(DELIVERY_TIMEOUT_S * 1000),
     )
     await producer.start()
@@ -102,7 +101,7 @@ async def vote(body: VoteIn, request: Request):
     raw = request.headers.get("cf-connecting-ip") or (xff.split(",")[0] if TRUST_XFF and xff else request.client.host)
     try:
         ip = ipaddress.ip_address(raw.strip())
-    except ValueError:  # STUB: question — an unparsable client IP is not in docs; treated as a bad request
+    except ValueError:  # contracts.md: an unparsable client IP is a bad request
         return Response(status_code=400)
     ip = getattr(ip, "ipv4_mapped", None) or ip  # ::ffff:a.b.c.d -> a.b.c.d
     if body.poll_id not in polls and unknown.get(body.poll_id, 0) < time.monotonic():  # activated less than a second ago?

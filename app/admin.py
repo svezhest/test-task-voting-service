@@ -1,6 +1,9 @@
 import json
 import os
 import shutil
+import subprocess
+import threading
+import time
 import urllib.request
 import uuid
 from pathlib import Path
@@ -38,10 +41,10 @@ class PollIn(BaseModel):
     question: NonBlank
     type: Literal["single", "multi"]
     options: list[NonBlank] = Field(min_length=2, max_length=64)
-    # STUB: question — docs say only "ISO 8601"; a time without a timezone is rejected with 422.
+    # api.md: a time without a timezone is 422
     window_start: AwareDatetime
     window_end: AwareDatetime
-    grace_s: int = Field(ge=0, le=86400)  # STUB: question — the upper bound (a day) is not in docs; above int32 it was a 500
+    grace_s: int = Field(ge=0, le=86400)  # a day at most; above int32 Postgres failed with a 500
 
     @model_validator(mode="after")
     def window(self):
@@ -165,15 +168,62 @@ def list_polls():
         return conn.execute(POLL + " order by created_at desc").fetchall()
 
 
+tunnel = None  # cloudflared process: the viewer entrance (nginx:82) on the internet; started only on request
+tunnel_lock = threading.Lock()
+
+
+def metrics(path):  # cloudflared's own metrics server inside this container
+    with urllib.request.urlopen(f"http://127.0.0.1:2000{path}", timeout=1) as r:
+        return json.load(r)
+
+
+def tunnel_url():
+    if tunnel is None or tunnel.poll() is not None:
+        return None
+    try:
+        hostname = metrics("/quicktunnel").get("hostname")
+    except Exception:  # not up yet
+        return None
+    return f"https://{hostname}" if hostname else None
+
+
 @app.get("/admin/public-url")
 def public_url():
-    try:
-        with urllib.request.urlopen("http://cloudflared:2000/quicktunnel", timeout=1) as r:
-            hostname = json.load(r).get("hostname")
-    except Exception:  # tunnel is off or not up yet
-        hostname = None
     lan = os.environ.get("HOST_LAN_IP")
-    return {"tunnel": f"https://{hostname}" if hostname else None, "lan": f"http://{lan}:8090" if lan else None}
+    return {"tunnel": tunnel_url(), "lan": f"http://{lan}:8090" if lan else None}
+
+
+@app.post("/admin/tunnel")
+def open_tunnel():
+    """Opens the viewer entrance to the internet; the admin entrance stays on this computer. 503 if not up in 30 s."""
+    global tunnel
+    with tunnel_lock:
+        if tunnel is None or tunnel.poll() is not None:
+            tunnel = subprocess.Popen(["cloudflared", "tunnel", "--no-autoupdate", "--metrics", "127.0.0.1:2000",
+                                       "--url", "http://nginx:82"])
+        for _ in range(30):
+            try:
+                if metrics("/ready")["readyConnections"] > 0 and tunnel_url():
+                    return public_url()
+            except Exception:  # metrics not up yet; /ready is 503 until the first connection
+                pass
+            time.sleep(1)
+        stop_tunnel()
+    raise HTTPException(503)
+
+
+def stop_tunnel():
+    global tunnel
+    if tunnel is not None:
+        tunnel.terminate()
+        tunnel.wait()
+        tunnel = None
+
+
+@app.delete("/admin/tunnel", status_code=204)
+def close_tunnel():
+    with tunnel_lock:
+        stop_tunnel()
 
 
 @app.get("/admin/polls/{poll_id}")

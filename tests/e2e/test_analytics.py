@@ -4,7 +4,7 @@ import uuid
 
 import pytest
 
-AUTH = {"Authorization": "Bearer dev-token"}
+from conftest import AUTH
 BUCKETS = {"1", "2-10", "11-100", "101+"}
 
 

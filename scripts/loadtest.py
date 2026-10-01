@@ -111,6 +111,8 @@ def ingest_run(poll, n, seconds=SECONDS):
     p = subprocess.Popen(["docker", "compose", "run", "--rm", "--no-deps", "-T", "load", "python", "scripts/loadtest.py", "gen", poll, str(seconds)],
                          cwd=ROOT, stdout=subprocess.PIPE, text=True)
     for line in p.stdout:
+        if not line.split():  # пустые строки в выводе docker compose run
+            continue
         word, *rest = line.split()
         if word == "hosts" and int(rest[0]) != n:
             sys.exit(f"генератор видит {rest[0]} реплик вместо {n}")
@@ -180,6 +182,7 @@ def stage1_run(w, poll, n_votes):
 
 
 def main():
+    sh("docker", "compose", "--profile", "load", "build", "load")  # заранее: вывод сборки не смешивается с выводом генератора
     sh("docker", "compose", "restart", "stage1")
     time.sleep(3)
     rss0 = rss_mib(sh("docker", "compose", "ps", "-q", "stage1"))  # свежий процесс без опросов — точка отсчёта памяти

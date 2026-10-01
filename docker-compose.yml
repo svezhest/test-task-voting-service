@@ -66,9 +66,5 @@ services:
       - ./web:/srv/static:ro
       - published:/srv/web:ro
 
-  cloudflared:
-    image: cloudflare/cloudflared:2026.9.3
-    command: tunnel --no-autoupdate --metrics 0.0.0.0:2000 --url http://nginx:82
-
 volumes:
   published:

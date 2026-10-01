@@ -3,7 +3,7 @@ import time
 
 import pytest
 
-AUTH = {"Authorization": "Bearer dev-token"}
+from conftest import AUTH
 
 
 def ts(s):

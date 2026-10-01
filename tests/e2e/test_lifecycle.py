@@ -2,7 +2,7 @@ import uuid
 
 import pytest
 
-AUTH = {"Authorization": "Bearer dev-token"}
+from conftest import AUTH
 
 
 @pytest.mark.parametrize("method,path", [
@@ -16,6 +16,8 @@ AUTH = {"Authorization": "Bearer dev-token"}
     ("POST", f"/admin/polls/{uuid.uuid4()}/finish"),
     ("DELETE", f"/admin/polls/{uuid.uuid4()}"),
     ("GET", "/admin/public-url"),
+    ("POST", "/admin/tunnel"),
+    ("DELETE", "/admin/tunnel"),
 ])
 @pytest.mark.parametrize("headers", [{}, {"Authorization": "Bearer wrong-token"}], ids=["no-token", "wrong-token"])
 def test_admin_requires_token(admin, method, path, headers):

@@ -26,6 +26,7 @@
   label:has(:checked) { border-color: var(--accent); }
   input { appearance: none; -webkit-appearance: none; flex: none; width: 18px; height: 18px; margin: 0;
     border: 1px solid var(--muted); background: transparent; }
+  input[type=radio] { border-radius: 50%; }  /* один вариант — круг, несколько — квадрат */
   input:checked { border-color: var(--accent); background: var(--accent); box-shadow: inset 0 0 0 3px var(--bg); }
   input:focus-visible, button:focus-visible { outline: 1px solid var(--accent); outline-offset: 3px; }
   button { display: block; min-width: 50%; min-height: 48px; margin-top: 32px; padding: 10px 28px; font-size: .9rem;

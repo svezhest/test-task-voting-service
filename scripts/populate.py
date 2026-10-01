@@ -4,7 +4,8 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 
-ADMIN, VOTE = "http://localhost:8091", "http://localhost:8090/api/vote"
+ADMIN = "http://localhost:8091"
+VOTE = ADMIN + "/api/vote"  # через админский вход: только там приём верит X-Forwarded-For (IP «зрителей»)
 TOKEN = os.environ.get("ADMIN_TOKEN", "dev-token")
 
 DRAFTS = [  # (дней от сегодня, вопрос, тип, варианты)

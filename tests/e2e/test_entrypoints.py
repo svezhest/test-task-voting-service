@@ -2,7 +2,7 @@ import uuid
 
 import pytest
 
-AUTH = {"Authorization": "Bearer dev-token"}
+from conftest import AUTH
 
 
 def ok(r):
@@ -15,6 +15,8 @@ def ok(r):
     ("POST", "/admin/polls"),
     ("GET", f"/admin/polls/{uuid.uuid4()}"),
     ("GET", "/admin/public-url"),
+    ("POST", "/admin/tunnel"),
+    ("DELETE", "/admin/tunnel"),
     ("GET", "/manage/"),
     ("GET", "/manage/index.html"),
 ])
@@ -35,16 +37,17 @@ def test_viewer_entry_serves_page_and_config(viewer, make_poll):
     assert r.json()["id"] == p["id"]
 
 
-def test_cf_connecting_ip_ignored_on_viewer_entry(make_poll, vote, wait_final, admin):
-    # contracts.md: CF-Connecting-IP принимается только из туннеля; на зрительском входе 8090 он сбрасывается.
-    # Два voter_id, один fp, разные XFF, один поддельный CF-Connecting-IP → два разных ip_hmac.
-    p = make_poll(window_s=5)
-    cf = {"CF-Connecting-IP": "203.0.113.77"}
-    ok(vote(p["id"], [0], None, {"model": "cf"}, ip="198.51.100.11", headers=cf))
-    ok(vote(p["id"], [1], None, {"model": "cf"}, ip="198.51.100.12", headers=cf))
+@pytest.mark.parametrize("header", ["X-Forwarded-For", "CF-Connecting-IP"])
+def test_forged_ip_ignored_on_viewer_entry(viewer, make_poll, wait_final, admin, header):
+    # contracts.md «Стенд»: на 8090 IP — адрес соединения. Два voter_id с одного компьютера и разными
+    # поддельными IP в заголовке → один ip_hmac на два голоса.
+    p = make_poll()
+    for i, ip in enumerate(["203.0.113.77", "203.0.113.78"]):
+        body = {"poll_id": p["id"], "options": [i], "voter_id": str(uuid.uuid4()), "fp": {"model": "forged"}}
+        ok(viewer.post("/api/vote", json=body, headers={header: ip}))
     res = wait_final(p)
     assert (res["received"], res["total"]) == (2, 2)
 
     a = admin.get(f"/admin/polls/{p['id']}/analytics", headers=AUTH).json()
     buckets = {b["bucket"]: (b["ips"], b["votes"]) for b in a["ip_concentration"]}
-    assert buckets["1"] == (2, 2), buckets
+    assert buckets["2-10"] == (1, 2), buckets
