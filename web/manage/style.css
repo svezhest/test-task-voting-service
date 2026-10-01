@@ -154,6 +154,16 @@ mark { background: var(--mark); color: inherit; }
 .row3 { display: grid; grid-template-columns: 1fr 1fr 140px; gap: 16px; }
 .when { display: grid; grid-template-columns: 1.25fr 1fr; gap: 8px; }
 .when input { min-width: 0; }
+.end-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 8px; font-size: 13px; }
+.end-head > span:first-child { font: 13px var(--mono); color: var(--muted); }
+.end-head .via { margin: 0; gap: 14px; }
+.end-head .via .link { padding-bottom: 0; border-bottom: 0; line-height: inherit; }
+.end-head .via .link.on { text-decoration: underline; text-underline-offset: 4px; }
+.end-field input[name=wdur] { width: 100%; }
+.quick { display: flex; gap: 6px; margin-top: 8px; }
+.quick button { padding: 5px 10px; font-size: 12px; }
+.quick button.on { color: var(--fg); border-color: var(--fg); }
+#end-at { margin: 8px 0 0; font-family: var(--mono); font-size: 12px; }
 .pick { position: relative; display: block; min-width: 0; }
 .pick input { width: 100%; }
 .pop { position: absolute; top: calc(100% + 4px); left: 0; z-index: 10; padding: 16px; background: var(--bg);
