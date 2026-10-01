@@ -114,8 +114,8 @@ class Vote:
     fp_hash: bytes        # 8 байт
     voter_id: uuid.UUID
 
-def encode(v: Vote) -> bytes      # ровно 73 байта, формат в api.md
-def decode(b: bytes) -> Vote      # ValueError при неверной длине или версии
+def encode(vote: Vote) -> bytes   # ровно 73 байта, формат в api.md
+def decode(record: bytes) -> Vote # ValueError при неверной длине или версии
 ```
 
 ### `app/dedup.py`

@@ -27,197 +27,303 @@ app = FastAPI(dependencies=[Depends(check_token)])
 
 
 @app.exception_handler(RequestValidationError)
-async def invalid_id(request, exc):  # a poll id that is not a UUID is an unknown poll
-    if any(e["loc"][:1] == ("path",) for e in exc.errors()):
+async def invalid_poll_id_is_404(request, exc):
+    if any(error["loc"][:1] == ("path",) for error in exc.errors()):
         return await http_exception_handler(request, HTTPException(404))
     return await request_validation_exception_handler(request, exc)
 
 
-NonBlank = Annotated[str, Field(pattern=r"\S")]  # at least one non-whitespace character
+NonBlank = Annotated[str, Field(pattern=r"\S")]
 
 
 class PollIn(BaseModel):
-    model_config = ConfigDict(extra="forbid")  # an unknown field (a typo, "status") is 422, not silently dropped
+    model_config = ConfigDict(extra="forbid")
     question: NonBlank
     type: Literal["single", "multi"]
     options: list[NonBlank] = Field(min_length=2, max_length=64)
-    # api.md: a time without a timezone is 422
     window_start: AwareDatetime
     window_end: AwareDatetime
-    grace_s: int = Field(ge=0, le=86400)  # a day at most; above int32 Postgres failed with a 500
+    grace_s: int = Field(ge=0, le=86400)
 
     @model_validator(mode="after")
-    def window(self):
+    def window_end_after_start(self):
         if self.window_end <= self.window_start:
             raise ValueError("window_end must be after window_start")
         return self
 
 
-POLL = """
+SELECT_POLLS = """
 select id, question, type, status, window_start, window_end, grace_s, created_at,
-       (select json_agg(json_build_object('idx', idx, 'label', label) order by idx)
-          from options where poll_id = polls.id) as options
-  from polls"""
+       (
+           select json_agg(json_build_object('idx', idx, 'label', label) order by idx)
+             from options
+            where poll_id = polls.id
+       ) as options
+  from polls
+"""
+POLL_DATA_TABLES = ("options", "results", "stage_progress", "fp_counts", "timeline", "stage2_stats")
+IP_BUCKETS = ["1", "2-10", "11-100", "101+"]
+FIXED_ARRIVAL_MODEL = {"median_s": 14, "sigma": 0.5}
 
 
-def db():
+def connect():
     return psycopg.connect(os.environ["DATABASE_URL"], row_factory=dict_row)
 
 
-def get_poll(conn, poll_id):
-    poll = conn.execute(POLL + " where id = %s", (poll_id,)).fetchone()
+def get_poll_or_404(conn, poll_id):
+    poll = conn.execute(SELECT_POLLS + " where id = %s", (poll_id,)).fetchone()
     if poll is None:
         raise HTTPException(404)
     return poll
 
 
-def change(conn, poll_id, sql, params):
-    """Atomic change: `sql` updates the poll only in the allowed status and returns its id; otherwise 404 or 409."""
-    if conn.execute(sql, params).fetchone() is None:
-        get_poll(conn, poll_id)  # 404 if unknown
+def update_poll_or_409(conn, poll_id, status_guarded_update, params):
+    """`status_guarded_update` changes the poll only in the allowed status and returns its id."""
+    updated = conn.execute(status_guarded_update, params).fetchone()
+    if updated is None:
+        get_poll_or_404(conn, poll_id)
         raise HTTPException(409)
-    return get_poll(conn, poll_id)
+    return get_poll_or_404(conn, poll_id)
 
 
-def totals(conn, poll_id):  # received (stage 1); root counted and total (results rows with option_idx = -1)
+def read_vote_totals(conn, poll_id):
     return conn.execute(
-        """select (select coalesce(sum(votes), 0) from stage_progress where poll_id = %(id)s and stage = 1)::bigint as received,
-                  coalesce(sum(counted), 0)::bigint as counted, coalesce(sum(total), 0)::bigint as total
-             from results where poll_id = %(id)s and option_idx = -1""",
+        """
+        select (
+                   select coalesce(sum(votes), 0)
+                     from stage_progress
+                    where poll_id = %(id)s
+                      and stage = 1
+               )::bigint as received,
+               coalesce(sum(counted), 0)::bigint as counted,
+               coalesce(sum(total), 0)::bigint as total
+          from results
+         where poll_id = %(id)s
+           and option_idx = -1
+        """,
         {"id": poll_id},
     ).fetchone()
 
 
-def set_options(conn, poll_id, options):
-    conn.execute("delete from options where poll_id = %s", (poll_id,))
+def replace_options(conn, poll_id, labels):
+    conn.execute(
+        """
+        delete from options
+         where poll_id = %s
+        """,
+        (poll_id,),
+    )
     conn.cursor().executemany(
-        "insert into options (poll_id, idx, label) values (%s, %s, %s)",
-        [(poll_id, idx, label) for idx, label in enumerate(options)],
+        """
+        insert into options (poll_id, idx, label)
+        values (%s, %s, %s)
+        """,
+        [(poll_id, idx, label) for idx, label in enumerate(labels)],
     )
 
 
 @app.post("/admin/polls", status_code=201)
 def create_poll(poll: PollIn):
     poll_id = uuid.uuid4()
-    with db() as conn:
+    with connect() as conn:
         conn.execute(
-            "insert into polls (id, question, type, window_start, window_end, grace_s) values (%s, %s, %s, %s, %s, %s)",
+            """
+            insert into polls (id, question, type, window_start, window_end, grace_s)
+            values (%s, %s, %s, %s, %s, %s)
+            """,
             (poll_id, poll.question, poll.type, poll.window_start, poll.window_end, poll.grace_s),
         )
-        set_options(conn, poll_id, poll.options)
-        return get_poll(conn, poll_id)
+        replace_options(conn, poll_id, poll.options)
+        return get_poll_or_404(conn, poll_id)
 
 
 @app.patch("/admin/polls/{poll_id}")
 def update_poll(poll_id: uuid.UUID, patch: dict):
-    with db() as conn:
-        conn.execute("select from polls where id = %s for update", (poll_id,))  # parallel PATCHes do not lose changes
-        poll = get_poll(conn, poll_id)
+    with connect() as conn:
+        # parallel PATCHes do not lose changes
+        conn.execute(
+            """
+            select
+              from polls
+             where id = %s
+               for update
+            """,
+            (poll_id,),
+        )
+        poll = get_poll_or_404(conn, poll_id)
         if poll["status"] != "draft":
             raise HTTPException(409)
-        poll["options"] = [o["label"] for o in poll["options"]]
+        current = {field: poll[field] for field in PollIn.model_fields}
+        current["options"] = [option["label"] for option in poll["options"]]
         try:
-            new = PollIn(**({k: poll[k] for k in PollIn.model_fields} | patch))
-        except ValidationError as e:
-            raise RequestValidationError(e.errors(include_url=False))
-        change(conn, poll_id, """update polls set question = %s, type = %s, window_start = %s, window_end = %s, grace_s = %s
-                                  where id = %s and status = 'draft' returning id""",
-               (new.question, new.type, new.window_start, new.window_end, new.grace_s, poll_id))
-        set_options(conn, poll_id, new.options)
-        return get_poll(conn, poll_id)
+            updated = PollIn(**(current | patch))
+        except ValidationError as error:
+            raise RequestValidationError(error.errors(include_url=False))
+        update_poll_or_409(
+            conn,
+            poll_id,
+            """
+            update polls
+               set question = %s,
+                   type = %s,
+                   window_start = %s,
+                   window_end = %s,
+                   grace_s = %s
+             where id = %s
+               and status = 'draft'
+            returning id
+            """,
+            (updated.question, updated.type, updated.window_start, updated.window_end, updated.grace_s, poll_id),
+        )
+        replace_options(conn, poll_id, updated.options)
+        return get_poll_or_404(conn, poll_id)
+
+
+def publish_page_config(poll_id, poll):
+    config = {key: poll[key] for key in ("id", "question", "type", "options", "window_start", "window_end", "grace_s")}
+    path = Path(os.environ["WEB_ROOT"], "p", str(poll_id), "config.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_name("config.json.tmp")  # atomic: nginx never serves a half-written file
+    temporary_path.write_text(json.dumps(jsonable_encoder(config), ensure_ascii=False))
+    os.replace(temporary_path, path)
 
 
 @app.post("/admin/polls/{poll_id}/activate")
 def activate_poll(poll_id: uuid.UUID):
-    with db() as conn:
-        poll = change(conn, poll_id, """update polls set status = 'active', salt = %s
-                                         where id = %s and status = 'draft' and now() <= window_end + make_interval(secs => grace_s)
-                                     returning id""", (os.urandom(32), poll_id))
-        config = {k: poll[k] for k in ("id", "question", "type", "options", "window_start", "window_end", "grace_s")}
-        path = Path(os.environ["WEB_ROOT"], "p", str(poll_id), "config.json")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name("config.json.tmp")  # atomic: nginx never serves a half-written file
-        tmp.write_text(json.dumps(jsonable_encoder(config), ensure_ascii=False))
-        os.replace(tmp, path)
+    with connect() as conn:
+        poll = update_poll_or_409(
+            conn,
+            poll_id,
+            """
+            update polls
+               set status = 'active',
+                   salt = %s
+             where id = %s
+               and status = 'draft'
+               and now() <= window_end + make_interval(secs => grace_s)
+            returning id
+            """,
+            (os.urandom(32), poll_id),
+        )
+        publish_page_config(poll_id, poll)
         return poll
 
 
 # config.json keeps the old window_end on purpose: the page only renders the question, the window is enforced by ingest.
 @app.post("/admin/polls/{poll_id}/finish")
 def finish_poll(poll_id: uuid.UUID):
-    with db() as conn:
-        return change(conn, poll_id, """update polls set window_end = now()
-                                         where id = %s and status = 'active' and window_start < now() and now() < window_end
-                                     returning id""", (poll_id,))
+    with connect() as conn:
+        return update_poll_or_409(
+            conn,
+            poll_id,
+            """
+            update polls
+               set window_end = now()
+             where id = %s
+               and status = 'active'
+               and window_start < now()
+               and now() < window_end
+            returning id
+            """,
+            (poll_id,),
+        )
 
 
 @app.delete("/admin/polls/{poll_id}", status_code=204)
 def delete_poll(poll_id: uuid.UUID):
-    with db() as conn:
-        get_poll(conn, poll_id)
-        for table in ("options", "results", "stage_progress", "fp_counts", "timeline", "stage2_stats"):
-            conn.execute(f"delete from {table} where poll_id = %s", (poll_id,))
-        if conn.execute("delete from polls where id = %s and status in ('draft', 'final')", (poll_id,)).rowcount == 0:
+    with connect() as conn:
+        get_poll_or_404(conn, poll_id)
+        for table in POLL_DATA_TABLES:
+            conn.execute(
+                f"""
+                delete from {table}
+                 where poll_id = %s
+                """,
+                (poll_id,),
+            )
+        deleted = conn.execute(
+            """
+            delete from polls
+             where id = %s
+               and status in ('draft', 'final')
+            """,
+            (poll_id,),
+        )
+        if deleted.rowcount == 0:
             raise HTTPException(409)  # rolls back the deletes above
     shutil.rmtree(Path(os.environ["WEB_ROOT"], "p", str(poll_id)), ignore_errors=True)
 
 
 @app.get("/admin/polls")
 def list_polls():
-    with db() as conn:
-        return conn.execute(POLL + " order by created_at desc").fetchall()
+    with connect() as conn:
+        return conn.execute(SELECT_POLLS + " order by created_at desc").fetchall()
 
 
-tunnel = None  # cloudflared process: the viewer entrance (nginx:82) on the internet; started only on request
+tunnel_process = None
 tunnel_lock = threading.Lock()
 
 
-def metrics(path):  # cloudflared's own metrics server inside this container
-    with urllib.request.urlopen(f"http://127.0.0.1:2000{path}", timeout=1) as r:
-        return json.load(r)
+def read_cloudflared_metrics(path):
+    with urllib.request.urlopen(f"http://127.0.0.1:2000{path}", timeout=1) as response:
+        return json.load(response)
+
+
+def tunnel_is_running():
+    return tunnel_process is not None and tunnel_process.poll() is None
 
 
 def tunnel_url():
-    if tunnel is None or tunnel.poll() is not None:
+    if not tunnel_is_running():
         return None
     try:
-        hostname = metrics("/quicktunnel").get("hostname")
+        hostname = read_cloudflared_metrics("/quicktunnel").get("hostname")
     except Exception:  # not up yet
         return None
-    return f"https://{hostname}" if hostname else None
+    if not hostname:
+        return None
+    return f"https://{hostname}"
+
+
+def tunnel_is_ready():
+    try:
+        connected = read_cloudflared_metrics("/ready")["readyConnections"] > 0
+    except Exception:  # metrics not up yet; /ready is 503 until the first connection
+        return False
+    return connected and tunnel_url() is not None
 
 
 @app.get("/admin/public-url")
 def public_url():
-    lan = os.environ.get("HOST_LAN_IP")
-    return {"tunnel": tunnel_url(), "lan": f"http://{lan}:8090" if lan else None}
+    lan_ip = os.environ.get("HOST_LAN_IP")
+    lan_url = None
+    if lan_ip:
+        lan_url = f"http://{lan_ip}:8090"
+    return {"tunnel": tunnel_url(), "lan": lan_url}
 
 
 @app.post("/admin/tunnel")
 def open_tunnel():
-    """Opens the viewer entrance to the internet; the admin entrance stays on this computer. 503 if not up in 30 s."""
-    global tunnel
+    global tunnel_process
     with tunnel_lock:
-        if tunnel is None or tunnel.poll() is not None:
-            tunnel = subprocess.Popen(["cloudflared", "tunnel", "--no-autoupdate", "--metrics", "127.0.0.1:2000",
-                                       "--url", "http://nginx:82"])
+        if not tunnel_is_running():
+            tunnel_process = subprocess.Popen(
+                ["cloudflared", "tunnel", "--no-autoupdate", "--metrics", "127.0.0.1:2000", "--url", "http://nginx:82"]
+            )
         for _ in range(30):
-            try:
-                if metrics("/ready")["readyConnections"] > 0 and tunnel_url():
-                    return public_url()
-            except Exception:  # metrics not up yet; /ready is 503 until the first connection
-                pass
+            if tunnel_is_ready():
+                return public_url()
             time.sleep(1)
         stop_tunnel()
     raise HTTPException(503)
 
 
 def stop_tunnel():
-    global tunnel
-    if tunnel is not None:
-        tunnel.terminate()
-        tunnel.wait()
-        tunnel = None
+    global tunnel_process
+    if tunnel_process is not None:
+        tunnel_process.terminate()
+        tunnel_process.wait()
+        tunnel_process = None
 
 
 @app.delete("/admin/tunnel", status_code=204)
@@ -228,62 +334,108 @@ def close_tunnel():
 
 @app.get("/admin/polls/{poll_id}")
 def read_poll(poll_id: uuid.UUID):
-    with db() as conn:
-        return get_poll(conn, poll_id)
+    with connect() as conn:
+        return get_poll_or_404(conn, poll_id)
+
+
+def ratio_or_none(part, whole):
+    if not whole:
+        return None
+    return part / whole
 
 
 @app.get("/admin/polls/{poll_id}/results")
 def poll_results(poll_id: uuid.UUID):
-    with db() as conn:
-        status = get_poll(conn, poll_id)["status"]
-        t = totals(conn, poll_id)
+    with connect() as conn:
+        status = get_poll_or_404(conn, poll_id)["status"]
+        totals = read_vote_totals(conn, poll_id)
         if status != "final":
-            return {"status": status, "received": t["received"]}
+            return {"status": status, "received": totals["received"]}
         options = conn.execute(
-            """select o.idx, o.label, coalesce(sum(r.counted), 0)::bigint as counted, coalesce(sum(r.total), 0)::bigint as total
-                 from options o left join results r on r.poll_id = o.poll_id and r.option_idx = o.idx
-                where o.poll_id = %s group by o.idx, o.label order by o.idx""",
+            """
+            select options.idx,
+                   options.label,
+                   coalesce(sum(results.counted), 0)::bigint as counted,
+                   coalesce(sum(results.total), 0)::bigint as total
+              from options
+              left join results
+                on results.poll_id = options.poll_id
+               and results.option_idx = options.idx
+             where options.poll_id = %s
+             group by options.idx, options.label
+             order by options.idx
+            """,
             (poll_id,),
         ).fetchall()
-    for o in options:
-        o["share"] = o["counted"] / t["counted"] if t["counted"] else None
-    return {"status": status, **t, "over_limit_share": 1 - t["counted"] / t["total"] if t["total"] else None, "options": options}
+    for option in options:
+        option["share"] = ratio_or_none(option["counted"], totals["counted"])
+    over_limit_share = None
+    if totals["total"]:
+        over_limit_share = 1 - totals["counted"] / totals["total"]
+    return {"status": status, **totals, "over_limit_share": over_limit_share, "options": options}
 
 
-BUCKETS = ["1", "2-10", "11-100", "101+"]
+def funnel(totals, partition_stats):
+    return {
+        "received": totals["received"],
+        "unique_voters": totals["total"],
+        "counted": totals["counted"],
+        "rejected": {
+            "repeat_voter": totals["received"] - totals["total"],
+            "key_limit": sum(stats["key_limit"] for stats in partition_stats),
+            "ip_ceiling": sum(stats["ip_ceiling"] for stats in partition_stats),
+        },
+    }
+
+
+def ip_concentration(partition_stats):
+    return [
+        {
+            "bucket": bucket,
+            "ips": sum(stats["ip_hist"][bucket]["ips"] for stats in partition_stats),
+            "votes": sum(stats["ip_hist"][bucket]["votes"] for stats in partition_stats),
+        }
+        for bucket in IP_BUCKETS
+    ]
 
 
 @app.get("/admin/polls/{poll_id}/analytics")
 def poll_analytics(poll_id: uuid.UUID):
-    with db() as conn:
-        poll = get_poll(conn, poll_id)
-        seconds = {r["second"]: r["votes"] for r in conn.execute(
-            "select second, sum(votes)::bigint as votes from timeline where poll_id = %s group by second", (poll_id,)
-        )}
+    with connect() as conn:
+        poll = get_poll_or_404(conn, poll_id)
+        rows = conn.execute(
+            """
+            select second,
+                   sum(votes)::bigint as votes
+              from timeline
+             where poll_id = %s
+             group by second
+            """,
+            (poll_id,),
+        )
+        votes_by_second = {row["second"]: row["votes"] for row in rows}
+        last_second = max(votes_by_second, default=-1)
         answer = {
             "status": poll["status"],
             "window_start": poll["window_start"],
-            "timeline": [{"t": t, "received": seconds.get(t, 0)} for t in range(max(seconds, default=-1) + 1)],
-            "model": {"median_s": 14, "sigma": 0.5},  # architecture.md: fixed model, not fitted to the poll
+            "timeline": [
+                {"t": second, "received": votes_by_second.get(second, 0)} for second in range(last_second + 1)
+            ],
+            "model": FIXED_ARRIVAL_MODEL,
             "funnel": None,
             "ip_concentration": None,
         }
         if poll["status"] != "final":
             return answer
-        t = totals(conn, poll_id)
-        stats = conn.execute("select key_limit, ip_ceiling, ip_hist from stage2_stats where poll_id = %s", (poll_id,)).fetchall()
-    answer["funnel"] = {
-        "received": t["received"],
-        "unique_voters": t["total"],
-        "counted": t["counted"],
-        "rejected": {
-            "repeat_voter": t["received"] - t["total"],
-            "key_limit": sum(s["key_limit"] for s in stats),
-            "ip_ceiling": sum(s["ip_ceiling"] for s in stats),
-        },
-    }
-    answer["ip_concentration"] = [
-        {"bucket": b, "ips": sum(s["ip_hist"][b]["ips"] for s in stats), "votes": sum(s["ip_hist"][b]["votes"] for s in stats)}
-        for b in BUCKETS
-    ]
+        totals = read_vote_totals(conn, poll_id)
+        partition_stats = conn.execute(
+            """
+            select key_limit, ip_ceiling, ip_hist
+              from stage2_stats
+             where poll_id = %s
+            """,
+            (poll_id,),
+        ).fetchall()
+    answer["funnel"] = funnel(totals, partition_stats)
+    answer["ip_concentration"] = ip_concentration(partition_stats)
     return answer

@@ -1,13 +1,13 @@
 create table polls (
-    id             uuid primary key,
-    question       text not null,
-    type           text not null,
-    status         text not null default 'draft',
-    window_start   timestamptz not null,
-    window_end     timestamptz not null,
-    grace_s        integer not null,
-    salt           bytea,
-    created_at     timestamptz not null default now()
+    id           uuid primary key,
+    question     text not null,
+    type         text not null,
+    status       text not null default 'draft',
+    window_start timestamptz not null,
+    window_end   timestamptz not null,
+    grace_s      integer not null,
+    salt         bytea,
+    created_at   timestamptz not null default now()
 );
 
 create table options (

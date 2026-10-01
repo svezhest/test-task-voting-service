@@ -4,56 +4,69 @@ import numpy
 from scipy.optimize import brentq
 from scipy.stats import poisson
 
+HONEST_QUANTILE = 0.9999
+LOG_BINS = 200
+BISECTION_STEPS = 60
+
 
 # STUB: simplification — docs suggest a precomputed table over a λ grid; we call scipy directly (exact, slower).
 def poisson_limit(lam: float) -> int:
-    return 1 + int(poisson.ppf(0.9999, lam))
+    return 1 + int(poisson.ppf(HONEST_QUANTILE, lam))
 
 
 # STUB: simplification — the same: scipy directly instead of a precomputed table over a λ grid.
-def poisson_limits(lam: numpy.ndarray) -> numpy.ndarray:  # poisson_limit for all keys at once
-    return 1 + poisson.ppf(0.9999, lam).astype(numpy.int64)
+def poisson_limits(lam: numpy.ndarray) -> numpy.ndarray:
+    return 1 + poisson.ppf(HONEST_QUANTILE, lam).astype(numpy.int64)
 
 
-def estimate_people(d: int, p: numpy.ndarray) -> float:  # exact, over the full array (stage 2 uses estimate_people_many)
+# exact, over the full array (stage 2 uses estimate_people_many)
+def estimate_people(d: int, p: numpy.ndarray) -> float:
     if d == 0:
         return 0.0
     if d == 1:
         return 1.0
     if d >= len(p):  # all fingerprints of the poll are on this IP: no root
         return float(d)
-    log_q = numpy.log1p(-numpy.asarray(p, dtype=float))
+    log_one_minus_p = numpy.log1p(-numpy.asarray(p, dtype=float))
 
-    def f(n):
-        return -numpy.expm1(n * log_q).sum() - d
+    def expected_minus_observed(n):
+        return -numpy.expm1(n * log_one_minus_p).sum() - d
 
-    hi = 2.0
-    while f(hi) < 0:
-        hi *= 2
-    return brentq(f, 0.0, hi)
+    upper = 2.0
+    while expected_minus_observed(upper) < 0:
+        upper *= 2
+    return brentq(expected_minus_observed, 0.0, upper)
 
 
 def estimate_people_many(d: numpy.ndarray, p: numpy.ndarray) -> numpy.ndarray:
-    """estimate_people for many d at once: p folded into 200 log bins (mean p of each bin), bisection for each distinct d."""
+    """estimate_people for many d at once: p folded into log bins (mean p per bin), bisection per distinct d."""
     log_p = numpy.log(p)
-    counts, edges = numpy.histogram(log_p, bins=200)
-    sums = numpy.histogram(log_p, bins=edges, weights=p)[0]
-    counts, log_q = counts[counts > 0], numpy.log1p(-sums[counts > 0] / counts[counts > 0])
-    u, back = numpy.unique(d, return_inverse=True)
-    solvable = (u > 1) & (u < len(p))
-    target = numpy.where(solvable, u, 0)  # others have no root to find
+    bin_sizes, bin_edges = numpy.histogram(log_p, bins=LOG_BINS)
+    bin_p_sums = numpy.histogram(log_p, bins=bin_edges, weights=p)[0]
+    non_empty = bin_sizes > 0
+    bin_sizes = bin_sizes[non_empty]
+    log_one_minus_bin_p = numpy.log1p(-bin_p_sums[non_empty] / bin_sizes)
 
-    def f(n):
-        return -(counts * numpy.expm1(n[:, None] * log_q)).sum(axis=1) - target
+    distinct_d, index_in_distinct = numpy.unique(d, return_inverse=True)
+    solvable = (distinct_d > 1) & (distinct_d < len(p))
+    target_d = numpy.where(solvable, distinct_d, 0)  # others have no root to find
 
-    lo, hi = numpy.zeros(len(u)), numpy.full(len(u), 2.0)
-    while (short := f(hi) < 0).any():
-        hi[short] *= 2
-    for _ in range(60):
-        mid = (lo + hi) / 2
-        below = f(mid) < 0
-        lo, hi = numpy.where(below, mid, lo), numpy.where(below, hi, mid)
-    return numpy.where(solvable, (lo + hi) / 2, u)[back].astype(float)
+    def expected_minus_observed(n):
+        return -(bin_sizes * numpy.expm1(n[:, None] * log_one_minus_bin_p)).sum(axis=1) - target_d
+
+    lower = numpy.zeros(len(distinct_d))
+    upper = numpy.full(len(distinct_d), 2.0)
+    upper_too_low = expected_minus_observed(upper) < 0
+    while upper_too_low.any():
+        upper[upper_too_low] *= 2
+        upper_too_low = expected_minus_observed(upper) < 0
+    for _ in range(BISECTION_STEPS):
+        middle = (lower + upper) / 2
+        root_above_middle = expected_minus_observed(middle) < 0
+        lower = numpy.where(root_above_middle, middle, lower)
+        upper = numpy.where(root_above_middle, upper, middle)
+    estimate_per_distinct_d = numpy.where(solvable, (lower + upper) / 2, distinct_d)
+    return estimate_per_distinct_d[index_in_distinct].astype(float)
 
 
 def key_limit(n_limit: int, distinct_voters: int, r: int) -> int:
