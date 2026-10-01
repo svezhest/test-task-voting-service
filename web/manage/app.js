@@ -387,7 +387,7 @@ function formView(p) {
     <fieldset><div class="row3">
       <label><span>Начало</span><div class="when">${whenFields('ws', start)}</div></label>
       <div class="end-field">
-        <div class="end-head"><span>Конец</span><span class="via"><button type="button" class="link" data-end="after">через</button><button type="button" class="link" data-end="at">в момент</button></span></div>
+        <div class="end-head"><button type="button" class="link" data-end="after">Длительность</button><button type="button" class="link" data-end="at">Время остановки</button></div>
         <div data-end-mode="after"><input name="wdur" inputmode="numeric" placeholder="ММ:СС" autocomplete="off" value="${durationText((end - start) / 1000)}">
           <div class="quick">${QUICK_DURATIONS.map(([sec, label]) => `<button type="button" class="ghost" data-duration="${sec}">${label}</button>`).join('')}</div>
           <p class="muted small" id="end-at"></p></div>
@@ -407,13 +407,13 @@ function formView(p) {
   form.elements.type.value = p ? p.type : 'single';
   form.querySelectorAll('[data-pick]').forEach(attachPicker);
 
-  // Конец: «через» длительность от начала или «в момент». При переключении одно пересчитывается в другое.
+  // Конец окна: длительность от начала или время остановки. При переключении одно пересчитывается в другое.
   let endMode = 'after';
   const startAt = () => parseWhen(form.elements.wsd.value, form.elements.wst.value);
   const duration = () => parseDuration(form.elements.wdur.value);
   const showEndAt = () => {
     const begin = startAt(), seconds = duration();
-    $('#end-at').textContent = begin && seconds ? `конец ${dateText(new Date(+begin + seconds * 1000))} ${timeText(new Date(+begin + seconds * 1000))}` : '';
+    $('#end-at').textContent = begin && seconds ? `остановка ${dateText(new Date(+begin + seconds * 1000))} ${timeText(new Date(+begin + seconds * 1000))}` : '';
     form.querySelectorAll('[data-duration]').forEach(b => b.classList.toggle('on', Number(b.dataset.duration) === seconds));
   };
   const setEndMode = mode => {
@@ -459,8 +459,8 @@ function formView(p) {
     : !f.wsd.value.trim() || !f.wst.value.trim() ? 'Укажите дату и время начала.'
     : !parseWhen(f.wsd.value, f.wst.value) ? 'Начало: дата в виде ДД.ММ.ГГГГ, время — ЧЧ:ММ или ЧЧ:ММ:СС.'
     : endMode === 'after' && !duration() ? 'Длительность: ММ:СС, например 01:30, или число минут.'
-    : endMode === 'at' && (!f.wed.value.trim() || !f.wet.value.trim()) ? 'Укажите дату и время конца.'
-    : endMode === 'at' && !parseWhen(f.wed.value, f.wet.value) ? 'Конец: дата в виде ДД.ММ.ГГГГ, время — ЧЧ:ММ или ЧЧ:ММ:СС.'
+    : endMode === 'at' && (!f.wed.value.trim() || !f.wet.value.trim()) ? 'Укажите дату и время остановки.'
+    : endMode === 'at' && !parseWhen(f.wed.value, f.wet.value) ? 'Время остановки: дата в виде ДД.ММ.ГГГГ, время — ЧЧ:ММ или ЧЧ:ММ:СС.'
     : f.grace.value === '' ? 'Укажите задержку в секундах.' : '';
 
   const buttons = on => form.querySelectorAll('.actions button').forEach(b => b.disabled = !on);
