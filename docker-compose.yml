@@ -53,6 +53,11 @@ services:
     <<: *app
     command: python -m app.stage2
 
+  load:  # make loadtest: load generator inside the compose network, straight to ingest:8000
+    build: .
+    profiles: [load]
+    volumes: [./scripts:/code/scripts:ro]
+
   nginx:
     image: nginx:1.27-alpine
     ports: ["8090:80", "127.0.0.1:8091:81"]

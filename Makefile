@@ -18,3 +18,6 @@ down:
 
 populate:
 	uv run python scripts/populate.py
+
+loadtest:
+	uv run python scripts/loadtest.py
