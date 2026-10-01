@@ -154,6 +154,23 @@ mark { background: var(--mark); color: inherit; }
 .row3 { display: grid; grid-template-columns: 1fr 1fr 140px; gap: 16px; }
 .when { display: grid; grid-template-columns: 1.25fr 1fr; gap: 8px; }
 .when input { min-width: 0; }
+.pick { position: relative; display: block; min-width: 0; }
+.pick input { width: 100%; }
+.pop { position: absolute; top: calc(100% + 4px); left: 0; z-index: 10; padding: 16px; background: var(--bg);
+  border: 1px solid var(--line); box-shadow: 0 8px 24px rgb(0 0 0 / .08); font-family: var(--mono); }
+.pop button { padding: 0; height: 34px; border: 1px solid transparent; background: none; color: var(--fg); font: 13px var(--mono); }
+.pop button:hover { background: var(--soft); border-color: transparent; color: var(--fg); }
+.pop button.today { border-color: var(--line); }
+.pop button.past { color: var(--muted); }
+.pop button.on, .pop button.on:hover { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+.pop-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.pop-head b { font-weight: 500; font-size: 14px; }
+.pop-head button { width: 34px; font-size: 18px; }
+.days7 { display: grid; grid-template-columns: repeat(7, 34px); gap: 2px; }
+.days7 span { text-align: center; font-size: 11px; color: var(--muted); padding-bottom: 4px; }
+.clock { display: grid; grid-template-columns: repeat(6, 38px); gap: 2px; }
+.pop-label { margin: 0 0 6px; font-size: 11px; color: var(--muted); }
+.clock + .pop-label { margin-top: 14px; }
 .actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
 
 .optlist { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); column-gap: 48px; }

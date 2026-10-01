@@ -385,8 +385,8 @@ function formView(p) {
     <fieldset><legend>Варианты ответа</legend><div id="opts"></div>
       <button type="button" id="add" class="ghost">Добавить вариант</button></fieldset>
     <fieldset><div class="row3">
-      <label><span>Начало</span><div class="when"><input name="wsd" inputmode="numeric" placeholder="ДД.ММ.ГГГГ" autocomplete="off" value="${dateText(start)}"><input name="wst" inputmode="numeric" placeholder="ЧЧ:ММ:СС" autocomplete="off" value="${timeText(start)}"></div></label>
-      <label><span>Конец</span><div class="when"><input name="wed" inputmode="numeric" placeholder="ДД.ММ.ГГГГ" autocomplete="off" value="${dateText(end)}"><input name="wet" inputmode="numeric" placeholder="ЧЧ:ММ:СС" autocomplete="off" value="${timeText(end)}"></div></label>
+      <label><span>Начало</span><div class="when">${whenFields('ws', start)}</div></label>
+      <label><span>Конец</span><div class="when">${whenFields('we', end)}</div></label>
       <label><span>Задержка, секунд</span><input type="number" name="grace" value="${p ? p.grace_s : 60}"></label>
     </div>
     <p class="muted small hint">Время по часам этого компьютера: ${esc(TZ)} (${zone(start)}).
@@ -399,6 +399,7 @@ function formView(p) {
   const form = $('#nf'), opts = $('#opts');
   form.elements.question.value = p ? p.question : '';
   form.elements.type.value = p ? p.type : 'single';
+  form.querySelectorAll('[data-pick]').forEach(attachPicker);
   const sync = () => [...opts.children].forEach((r, i) => r.firstChild.textContent = i + 1);
   const add = label => {
     const d = document.createElement('div');
@@ -448,6 +449,78 @@ function formView(p) {
     toast(p ? 'Изменения сохранены.' : 'Черновик создан. Проверьте его и запустите.', true);
     location.hash = '#/p/' + saved.id;
   };
+}
+
+// ---------- выбор даты и времени: свой, в поясе TZ; поле остаётся текстовым ----------
+
+const whenFields = (name, d) => `<span class="pick"><input name="${name}d" data-pick="date" inputmode="numeric" placeholder="ДД.ММ.ГГГГ" autocomplete="off" value="${dateText(d)}"></span>`
+  + `<span class="pick"><input name="${name}t" data-pick="time" inputmode="numeric" placeholder="ЧЧ:ММ:СС" autocomplete="off" value="${timeText(d)}"></span>`;
+const WEEKDAYS = ['пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс'];
+
+// Окошко под полем: открывается по фокусу, закрывается, когда поле теряет фокус или по Esc.
+// Кнопки окошка не забирают фокус у поля (mousedown без действия по умолчанию).
+function attachPicker(input) {
+  const pop = document.createElement('div');
+  pop.className = 'pop';
+  pop.hidden = true;
+  input.after(pop);
+  pop.onmousedown = e => e.preventDefault();
+  let shown = null;   // месяц календаря {year, month}
+  const draw = () => input.dataset.pick === 'date' ? drawCalendar() : drawClock();
+
+  function drawCalendar() {
+    const picked = input.value.trim().match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+    const pickedKey = picked ? `${picked[3]}-${pad(picked[2])}-${pad(picked[1])}` : '';
+    const todayKey = dayKey(new Date());
+    if (!shown) {
+      const [year, month] = (pickedKey || todayKey).split('-').map(Number);
+      shown = { year, month };
+    }
+    const { year, month } = shown;
+    const firstWeekday = (new Date(Date.UTC(year, month - 1, 1)).getUTCDay() + 6) % 7;
+    const days = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    let cells = WEEKDAYS.map(w => `<span>${w}</span>`).join('') + '<i></i>'.repeat(firstWeekday);
+    for (let day = 1; day <= days; day++) {
+      const key = `${year}-${pad(month)}-${pad(day)}`;
+      const cls = [key === pickedKey && 'on', key === todayKey && 'today', key < todayKey && 'past'].filter(Boolean).join(' ');
+      cells += `<button type="button" data-day="${day}" class="${cls}">${day}</button>`;
+    }
+    pop.innerHTML = `<div class="pop-head"><button type="button" data-step="-1" aria-label="Предыдущий месяц">‹</button>
+      <b>${monName(`${year}-${month}`)}</b><button type="button" data-step="1" aria-label="Следующий месяц">›</button></div>
+      <div class="days7">${cells}</div>`;
+    pop.querySelectorAll('[data-step]').forEach(b => b.onclick = () => {
+      const index = year * 12 + month - 1 + Number(b.dataset.step);
+      shown = { year: Math.floor(index / 12), month: index % 12 + 1 };
+      drawCalendar();
+    });
+    pop.querySelectorAll('[data-day]').forEach(b => b.onclick = () => {
+      input.value = `${pad(b.dataset.day)}.${pad(month)}.${year}`;
+      pop.hidden = true;
+    });
+  }
+
+  function drawClock() {
+    const picked = input.value.trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+    const hour = picked ? Number(picked[1]) : null, minute = picked ? Number(picked[2]) : null;
+    const grid = (unit, values, current) => values.map(v =>
+      `<button type="button" data-${unit}="${v}" class="${v === current ? 'on' : ''}">${pad(v)}</button>`).join('');
+    pop.innerHTML = `<p class="pop-label">часы</p><div class="clock">${grid('hour', [...Array(24).keys()], hour)}</div>
+      <p class="pop-label">минуты</p><div class="clock">${grid('minute', [...Array(12).keys()].map(i => i * 5), minute)}</div>`;
+    pop.querySelectorAll('[data-hour]').forEach(b => b.onclick = () => {
+      input.value = `${pad(b.dataset.hour)}:${pad(minute ?? 0)}:00`;
+      drawClock();
+    });
+    pop.querySelectorAll('[data-minute]').forEach(b => b.onclick = () => {
+      input.value = `${pad(hour ?? 0)}:${pad(b.dataset.minute)}:00`;
+      pop.hidden = true;
+    });
+  }
+
+  input.addEventListener('focus', () => { shown = null; draw(); pop.hidden = false; });
+  input.addEventListener('click', () => { if (pop.hidden) { shown = null; draw(); pop.hidden = false; } });
+  input.addEventListener('input', () => { shown = null; if (!pop.hidden) draw(); });
+  input.addEventListener('blur', () => pop.hidden = true);
+  input.addEventListener('keydown', e => { if (e.key === 'Escape') pop.hidden = true; });
 }
 
 // ---------- своё квадратное окошко подтверждения ----------
