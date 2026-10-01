@@ -82,6 +82,7 @@ draft ──activate──► active ──конец окна + допуск─
 | `DELETE /admin/polls/{id}` | Удалить опрос. |
 | `GET /admin/polls` | Список опросов. |
 | `GET /admin/public-url` | Адреса, по которым стенд виден с телефона. |
+| `GET /admin/timezone` | Часовой пояс компьютера со стендом: `{"timezone": "Europe/Moscow" \| null}`. |
 | `POST /admin/tunnel`, `DELETE /admin/tunnel` | Открыть и закрыть страницу голосования из интернета. |
 | `GET /admin/polls/{id}` | Опрос. |
 | `GET /admin/polls/{id}/results` | Итоги. |

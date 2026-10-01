@@ -16,6 +16,7 @@ from conftest import AUTH
     ("POST", f"/admin/polls/{uuid.uuid4()}/finish"),
     ("DELETE", f"/admin/polls/{uuid.uuid4()}"),
     ("GET", "/admin/public-url"),
+    ("GET", "/admin/timezone"),
     ("POST", "/admin/tunnel"),
     ("DELETE", "/admin/tunnel"),
 ])

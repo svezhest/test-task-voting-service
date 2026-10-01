@@ -15,6 +15,7 @@ def ok(r):
     ("POST", "/admin/polls"),
     ("GET", f"/admin/polls/{uuid.uuid4()}"),
     ("GET", "/admin/public-url"),
+    ("GET", "/admin/timezone"),
     ("POST", "/admin/tunnel"),
     ("DELETE", "/admin/tunnel"),
     ("GET", "/manage/"),

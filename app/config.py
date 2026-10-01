@@ -12,6 +12,7 @@ KAFKA_BOOTSTRAP = setting("KAFKA_BOOTSTRAP", "redpanda:9092")
 ADMIN_TOKEN = setting("ADMIN_TOKEN", "dev-token")
 WEB_ROOT = setting("WEB_ROOT", "/srv/web")
 HOST_LAN_IP = setting("HOST_LAN_IP", "")
+HOST_TZ = setting("HOST_TZ", "")  # the admin shows times on the clock of the computer running the stand
 TRUST_XFF = setting("TRUST_XFF", "0") == "1"
 
 # Workers: a process reads partitions p with p % WORKERS == WORKER_INDEX

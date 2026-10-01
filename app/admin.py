@@ -13,7 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from psycopg.rows import dict_row
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from app.config import ADMIN_TOKEN, DATABASE_URL, HOST_LAN_IP, WEB_ROOT
+from app.config import ADMIN_TOKEN, DATABASE_URL, HOST_LAN_IP, HOST_TZ, WEB_ROOT
 from app.tunnel import CloudflareTunnel
 
 
@@ -266,6 +266,11 @@ def public_url(request: Request):
     if HOST_LAN_IP:
         lan_url = f"http://{HOST_LAN_IP}:8090"
     return {"tunnel": request.app.state.tunnel.url(), "lan": lan_url}
+
+
+@app.get("/admin/timezone")
+def timezone():
+    return {"timezone": HOST_TZ or None}
 
 
 @app.post("/admin/tunnel")

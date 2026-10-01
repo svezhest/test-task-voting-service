@@ -1,7 +1,9 @@
 ADMIN_TOKEN ?= dev-token
 # macOS: address of the default-route interface; Linux: hostname -I
 HOST_LAN_IP ?= $(shell ipconfig getifaddr $$(route -n get default 2>/dev/null | awk '/interface:/{print $$2}') 2>/dev/null || hostname -I 2>/dev/null | cut -d' ' -f1)
-export ADMIN_TOKEN HOST_LAN_IP
+# time zone of this computer (the admin shows times on its clock): /etc/localtime -> …/zoneinfo/Europe/Moscow
+HOST_TZ ?= $(shell readlink /etc/localtime 2>/dev/null | sed 's|.*zoneinfo/||')
+export ADMIN_TOKEN HOST_LAN_IP HOST_TZ
 
 up:
 	docker compose up -d --build

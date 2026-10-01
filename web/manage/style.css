@@ -152,6 +152,8 @@ mark { background: var(--mark); color: inherit; }
 .opt { display: grid; grid-template-columns: 28px 1fr auto; gap: 8px; align-items: center; margin-bottom: 8px; }
 .opt .ghost { padding: 10px 14px; }
 .row3 { display: grid; grid-template-columns: 1fr 1fr 140px; gap: 16px; }
+.when { display: grid; grid-template-columns: 1.25fr 1fr; gap: 8px; }
+.when input { min-width: 0; }
 .actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
 
 .optlist { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); column-gap: 48px; }

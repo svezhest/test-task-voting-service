@@ -13,6 +13,7 @@ x-app: &app
     STAGE2_WORKERS: "1"
     STAGE2_WORKER_INDEX: "0"
     HOST_LAN_IP: ${HOST_LAN_IP:-}
+    HOST_TZ: ${HOST_TZ:-}
   depends_on:
     postgres: {condition: service_healthy}
     topics: {condition: service_completed_successfully}

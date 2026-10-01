@@ -2,6 +2,7 @@
 const $ = s => document.querySelector(s);
 const main = $('#main');
 const KEY = 'admin_token';
+let TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;   // пояс компьютера со стендом, см. loadTimezone
 let token = localStorage.getItem(KEY) || '';
 let gen = 0;      // номер текущего экрана: ответы от ушедших экранов не рисуем
 let timer = null;
@@ -10,8 +11,8 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': 
 const num = n => n == null ? '—' : Number(n).toLocaleString('ru-RU');
 const short = n => new Intl.NumberFormat('ru-RU', { notation: 'compact', maximumFractionDigits: 1 }).format(n);
 const pct = x => x == null ? '—' : (x * 100).toFixed(1).replace('.', ',') + '%';
-const dt = s => new Date(s).toLocaleString('ru-RU');
-const when = s => new Date(s).toLocaleString('ru-RU', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' });
+const dt = s => new Date(s).toLocaleString('ru-RU', { timeZone: TZ });
+const when = s => new Date(s).toLocaleString('ru-RU', { timeZone: TZ, day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' });
 const STATUS = { draft: 'Черновик', planned: 'Запланирован', active: 'Идёт голосование', counting: 'Подсчёт', final: 'Готово' };
 const TYPE = { single: 'Один вариант ответа', multi: 'Несколько вариантов ответа' };
 // Показываемый статус считаем из status и часов: active до начала окна — «Запланирован»,
@@ -23,15 +24,50 @@ const phase = (p, status = p.status) => {
 };
 const badge = (p, status) => { const s = phase(p, status); return `<span class="badge s-${s}">${STATUS[s]}</span>`; };
 
-// ---------- местное время для полей datetime-local ----------
+// ---------- время: по часам компьютера, на котором поднят стенд ----------
+// Админка открыта только с этого компьютера. Браузер может скрывать свой пояс (LibreWolf и Tor показывают UTC),
+// поэтому пояс берём у сервера (GET /admin/timezone); пока не загрузили — пояс браузера.
 
 const pad = n => String(n).padStart(2, '0');
-// Date -> «2026-10-01T21:00:00» по часам компьютера
-const local = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-const offset = d => { const o = -d.getTimezoneOffset(); return (o < 0 ? '-' : '+') + pad(Math.floor(Math.abs(o) / 60)) + ':' + pad(Math.abs(o) % 60); };
-// ISO 8601 со смещением компьютера: «2026-10-01T21:00:00+03:00»
-const iso = d => local(d) + offset(d);
-const zone = d => { const o = -d.getTimezoneOffset(), h = Math.floor(Math.abs(o) / 60), m = Math.abs(o) % 60; return 'UTC' + (o < 0 ? '−' : '+') + h + (m ? ':' + pad(m) : ''); };
+// части даты в поясе TZ: {year, month, day, hour, minute, second}
+function wall(d) {
+  const parts = new Intl.DateTimeFormat('en-GB', { timeZone: TZ, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit' }).formatToParts(d);
+  const w = {};
+  for (const { type, value } of parts) if (type !== 'literal') w[type] = Number(value);
+  return w;
+}
+// смещение пояса TZ от UTC в минутах в момент d
+function offsetMinutes(d) {
+  const w = wall(d);
+  return Math.round((Date.UTC(w.year, w.month - 1, w.day, w.hour, w.minute, w.second) - Math.floor(d / 1000) * 1000) / 60000);
+}
+// дата и время на часах пояса TZ -> момент
+function fromWall(year, month, day, hour, minute, second) {
+  const asUtc = Date.UTC(year, month - 1, day, hour, minute, second);
+  const first = asUtc - offsetMinutes(new Date(asUtc)) * 60000;
+  return new Date(asUtc - offsetMinutes(new Date(first)) * 60000);   // второй шаг — на случай перехода на летнее время
+}
+const dateText = d => { const w = wall(d); return `${pad(w.day)}.${pad(w.month)}.${w.year}`; };
+const timeText = d => { const w = wall(d); return `${pad(w.hour)}:${pad(w.minute)}:${pad(w.second)}`; };
+const offsetText = d => {
+  const o = offsetMinutes(d), sign = o < 0 ? '-' : '+';
+  return sign + pad(Math.floor(Math.abs(o) / 60)) + ':' + pad(Math.abs(o) % 60);
+};
+// ISO 8601 со смещением пояса TZ: «2026-10-01T21:00:00+03:00»
+const iso = d => { const w = wall(d); return `${w.year}-${pad(w.month)}-${pad(w.day)}T${timeText(d)}${offsetText(d)}`; };
+const zone = d => { const o = offsetMinutes(d), h = Math.floor(Math.abs(o) / 60), m = Math.abs(o) % 60; return 'UTC' + (o < 0 ? '−' : '+') + h + (m ? ':' + pad(m) : ''); };
+// «01.10.2026» и «21:00» или «21:00:30» -> момент; null, если не разобрать
+function parseWhen(date, time) {
+  const dm = date.trim().match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+  const tm = time.trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!dm || !tm) return null;
+  const [day, month, year] = dm.slice(1).map(Number);
+  const [hour, minute, second = 0] = tm.slice(1).filter(x => x !== undefined).map(Number);
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  if (month < 1 || month > 12 || day < 1 || day > daysInMonth || hour > 23 || minute > 59 || second > 59) return null;
+  return fromWall(year, month, day, hour, minute, second);
+}
 
 // ---------- уведомление справа внизу ----------
 
@@ -145,10 +181,21 @@ netBox.onchange = async () => {
 
 // ---------- маршруты: #/  #/new  #/p/{id}  #/p/{id}/edit ----------
 
-function route() {
+// Пояс компьютера со стендом: один раз за вкладку. Неизвестное браузеру имя пояса — остаётся пояс браузера.
+let timezoneLoaded = null;
+function loadTimezone() {
+  timezoneLoaded ??= api('GET', '/timezone').then(r => {
+    try { if (r.timezone) { new Intl.DateTimeFormat('en', { timeZone: r.timezone }); TZ = r.timezone; } } catch {}
+  }, () => { timezoneLoaded = null; });
+  return timezoneLoaded;
+}
+
+async function route() {
   const g = ++gen;
   clearTimeout(timer);
   if (!token) return login();
+  await loadTimezone();
+  if (g !== gen) return;
   document.body.classList.remove('anon');
   syncNet();
   const m = location.hash.match(/^#\/p\/([^/]+)(\/edit)?$/);
@@ -163,7 +210,8 @@ window.addEventListener('hashchange', route);
 
 const plural = (n, one, few, many) => n % 10 === 1 && n % 100 !== 11 ? one : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? few : many;
 const polls_ = n => `${num(n)} ${plural(n, 'опрос', 'опроса', 'опросов')}`;
-const dayKey = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;   // местная дата «2026-09-30»
+const dayKey = d => { const w = wall(d); return `${w.year}-${pad(w.month)}-${pad(w.day)}`; };   // дата в поясе TZ «2026-09-30»
+const utcKey = d => d.toISOString().slice(0, 10);   // календарь считает дни в UTC-датах, без поясов
 const startKey = p => dayKey(new Date(p.window_start));
 const MON = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
 const dayName = k => { const [y, m, d] = k.split('-').map(Number); return new Date(y, m - 1, d).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' }) + ' ' + y; };
@@ -237,9 +285,10 @@ function calendar(polls) {
     const k = startKey(p), m = k.slice(0, 7);
     n[k] = (n[k] || 0) + 1; n[m] = (n[m] || 0) + 1;
   }
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const d = new Date(today); d.setDate(d.getDate() - 364); d.setDate(d.getDate() - (d.getDay() + 6) % 7);
-  const end = new Date(today); end.setDate(end.getDate() + 6 - (today.getDay() + 6) % 7);
+  const [ty, tm, td] = dayKey(new Date()).split('-').map(Number);
+  const today = new Date(Date.UTC(ty, tm - 1, td));
+  const d = new Date(today); d.setUTCDate(d.getUTCDate() - 364); d.setUTCDate(d.getUTCDate() - (d.getUTCDay() + 6) % 7);
+  const end = new Date(today); end.setUTCDate(end.getUTCDate() + 6 - (today.getUTCDay() + 6) % 7);
   const keys = Object.keys(n), max = k => Math.max(1, ...keys.filter(x => x.length === k).map(x => n[x]));
   const dmax = max(10), mmax = max(7);
   // насыщенность 0–4 по логарифму: один опрос в день заметен и рядом с днём, где их сотня
@@ -247,14 +296,14 @@ function calendar(polls) {
   let days = '', year = 0;
   const heads = [];
   while (d <= end) {
-    for (let i = 0; i < 7; i++, d.setDate(d.getDate() + 1)) {
-      const k = dayKey(d), c = n[k] || 0;
+    for (let i = 0; i < 7; i++, d.setUTCDate(d.getUTCDate() + 1)) {
+      const k = utcKey(d), c = n[k] || 0;
       if (d <= today) year += c;
       days += `<i data-d="${k}" data-t="${dayName(k)} · ${c ? polls_(c) : 'опросов нет'}" class="l${lvl(c, dmax)}${d > today && !c ? ' later' : ''}"></i>`;
     }
     // неделя относится к месяцу своего воскресенья: подпись месяца встаёт над неделей с его первым числом;
     // у месяца в одну неделю подписи нет — кроме текущего, его подпись заходит за край
-    const m = dayKey(new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1)).slice(0, 7);
+    const m = utcKey(new Date(d - 86400000)).slice(0, 7);
     if (heads.length && heads.at(-1).m === m) heads.at(-1).span++; else heads.push({ m, span: 1 });
   }
   return `<section class="cal">
@@ -336,13 +385,12 @@ function formView(p) {
     <fieldset><legend>Варианты ответа</legend><div id="opts"></div>
       <button type="button" id="add" class="ghost">Добавить вариант</button></fieldset>
     <fieldset><div class="row3">
-      <label><span>Начало</span><input type="datetime-local" step="1" name="ws" value="${local(start)}"></label>
-      <label><span>Конец</span><input type="datetime-local" step="1" name="we" value="${local(end)}"></label>
+      <label><span>Начало</span><div class="when"><input name="wsd" inputmode="numeric" placeholder="ДД.ММ.ГГГГ" autocomplete="off" value="${dateText(start)}"><input name="wst" inputmode="numeric" placeholder="ЧЧ:ММ:СС" autocomplete="off" value="${timeText(start)}"></div></label>
+      <label><span>Конец</span><div class="when"><input name="wed" inputmode="numeric" placeholder="ДД.ММ.ГГГГ" autocomplete="off" value="${dateText(end)}"><input name="wet" inputmode="numeric" placeholder="ЧЧ:ММ:СС" autocomplete="off" value="${timeText(end)}"></div></label>
       <label><span>Задержка, секунд</span><input type="number" name="grace" value="${p ? p.grace_s : 60}"></label>
     </div>
-    <p class="muted small hint">Время местное, по часам этого компьютера (${zone(start)}).
-      Задержка — сколько секунд после конца ещё принимать голоса: у части зрителей трансляция отстаёт.</p>
-    ${start.getTimezoneOffset() === 0 ? '<p class="muted tz">Браузер показывает время по UTC. Если вы не в этом поясе, браузер его скрывает (защита от слежки, как в LibreWolf или Tor): вводите время по UTC</p>' : ''}</fieldset>
+    <p class="muted small hint">Время по часам этого компьютера: ${esc(TZ)} (${zone(start)}).
+      Задержка — сколько секунд после конца ещё принимать голоса: у части зрителей трансляция отстаёт.</p></fieldset>
     <div class="actions">
       <button>${p ? 'Сохранить' : 'Создать черновик'}</button>
       <a class="btn ghost" href="${p ? '#/p/' + esc(p.id) : '#/'}">Отмена</a>
@@ -367,8 +415,10 @@ function formView(p) {
   // Пустые поля ловим сами, до сервера: так фраза точнее, а пустое время в дату не превратить.
   const missing = f => !f.question.value.trim() ? 'Напишите вопрос.'
     : [...opts.querySelectorAll('input')].some(i => !i.value.trim()) ? EMPTY_OPT
-    : !f.ws.value ? 'Укажите время начала.'
-    : !f.we.value ? 'Укажите время конца.'
+    : !f.wsd.value.trim() || !f.wst.value.trim() ? 'Укажите дату и время начала.'
+    : !f.wed.value.trim() || !f.wet.value.trim() ? 'Укажите дату и время конца.'
+    : !parseWhen(f.wsd.value, f.wst.value) ? 'Начало: дата в виде ДД.ММ.ГГГГ, время — ЧЧ:ММ или ЧЧ:ММ:СС.'
+    : !parseWhen(f.wed.value, f.wet.value) ? 'Конец: дата в виде ДД.ММ.ГГГГ, время — ЧЧ:ММ или ЧЧ:ММ:СС.'
     : f.grace.value === '' ? 'Укажите задержку в секундах.' : '';
 
   const buttons = on => form.querySelectorAll('.actions button').forEach(b => b.disabled = !on);
@@ -381,8 +431,8 @@ function formView(p) {
       question: f.question.value.trim(),
       type: f.type.value,
       options: [...opts.querySelectorAll('input')].map(i => i.value.trim()),
-      window_start: iso(new Date(f.ws.value)),
-      window_end: iso(new Date(f.we.value)),
+      window_start: iso(parseWhen(f.wsd.value, f.wst.value)),
+      window_end: iso(parseWhen(f.wed.value, f.wet.value)),
       grace_s: Number(f.grace.value),
     };
     buttons(false);
@@ -528,8 +578,8 @@ function live(p, status) {
   if (!$('#notice')) return;
   const now = Date.now(), start = new Date(p.window_start), can = status === 'active' && now >= start && now < new Date(p.window_end);
   // время начала: сегодня — только часы, иначе с датой; секунды — если они есть
-  const at = start.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', ...(start.getSeconds() && { second: '2-digit' }) });
-  const day = dayKey(start) === dayKey(new Date()) ? 'в ' : start.toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' }) + ' в ';
+  const at = start.toLocaleTimeString('ru-RU', { timeZone: TZ, hour: '2-digit', minute: '2-digit', ...(wall(start).second && { second: '2-digit' }) });
+  const day = dayKey(start) === dayKey(new Date()) ? 'в ' : start.toLocaleDateString('ru-RU', { timeZone: TZ, day: 'numeric', month: 'long' }) + ' в ';
   $('#notice').textContent = phase(p, status) === 'planned' ? `Опрос запланирован: голосование начнётся ${day}${at}. Изменить или удалить его нельзя.`
     : 'Опрос запущен: изменить или удалить его нельзя' + (can ? ', но можно завершить досрочно.' : ' до завершения.');
   $('#finrow').hidden = !can;
