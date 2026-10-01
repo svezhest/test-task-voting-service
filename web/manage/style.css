@@ -168,9 +168,14 @@ mark { background: var(--mark); color: inherit; }
 .pop-head button { width: 34px; font-size: 18px; }
 .days7 { display: grid; grid-template-columns: repeat(7, 34px); gap: 2px; }
 .days7 span { text-align: center; font-size: 11px; color: var(--muted); padding-bottom: 4px; }
-.clock { display: grid; grid-template-columns: repeat(6, 38px); gap: 2px; }
-.pop-label { margin: 0 0 6px; font-size: 11px; color: var(--muted); }
-.clock + .pop-label { margin-top: 14px; }
+.cols-head, .cols { display: grid; grid-template-columns: repeat(3, 56px); gap: 4px; }
+.cols-head span { text-align: center; font-size: 11px; color: var(--muted); padding-bottom: 6px; }
+.col { height: 224px; overflow-y: auto; scrollbar-width: thin; display: flex; flex-direction: column; }
+.col button { flex: none; height: 32px; width: 100%; }
+.pop-foot { display: flex; justify-content: space-between; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.pop .pop-foot button { height: auto; padding: 6px 10px; font-size: 13px; }
+.pop .pop-foot .done { background: var(--fg); color: var(--bg); }
+.pop .pop-foot .done:hover { background: var(--accent); color: var(--bg); }
 .actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
 
 .optlist { list-style: none; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); column-gap: 48px; }

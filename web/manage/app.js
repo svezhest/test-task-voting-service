@@ -499,26 +499,51 @@ function attachPicker(input) {
     });
   }
 
+  // Три прокручиваемых столбца: часы, минуты, секунды. Клик меняет одну часть времени, окошко остаётся открытым.
   function drawClock() {
-    const picked = input.value.trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
-    const hour = picked ? Number(picked[1]) : null, minute = picked ? Number(picked[2]) : null;
-    const grid = (unit, values, current) => values.map(v =>
-      `<button type="button" data-${unit}="${v}" class="${v === current ? 'on' : ''}">${pad(v)}</button>`).join('');
-    pop.innerHTML = `<p class="pop-label">часы</p><div class="clock">${grid('hour', [...Array(24).keys()], hour)}</div>
-      <p class="pop-label">минуты</p><div class="clock">${grid('minute', [...Array(12).keys()].map(i => i * 5), minute)}</div>`;
-    pop.querySelectorAll('[data-hour]').forEach(b => b.onclick = () => {
-      input.value = `${pad(b.dataset.hour)}:${pad(minute ?? 0)}:00`;
-      drawClock();
+    const column = (unit, count) => `<div class="col" data-unit="${unit}">${[...Array(count).keys()].map(v =>
+      `<button type="button" data-value="${v}">${pad(v)}</button>`).join('')}</div>`;
+    pop.innerHTML = `<div class="cols-head"><span>ч</span><span>мин</span><span>с</span></div>
+      <div class="cols">${column('hour', 24)}${column('minute', 60)}${column('second', 60)}</div>
+      <div class="pop-foot"><button type="button" class="now">Сейчас</button><button type="button" class="done">Готово</button></div>`;
+    pop.querySelectorAll('.col button').forEach(b => b.onclick = () => {
+      const time = currentTime();
+      time[b.parentElement.dataset.unit] = Number(b.dataset.value);
+      input.value = `${pad(time.hour)}:${pad(time.minute)}:${pad(time.second)}`;
+      markTime(false);
     });
-    pop.querySelectorAll('[data-minute]').forEach(b => b.onclick = () => {
-      input.value = `${pad(hour ?? 0)}:${pad(b.dataset.minute)}:00`;
-      pop.hidden = true;
+    pop.querySelector('.now').onclick = () => { input.value = timeText(new Date()); markTime(true); };
+    pop.querySelector('.done').onclick = () => pop.hidden = true;
+    markTime(true);
+  }
+
+  function currentTime() {
+    const picked = input.value.trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+    if (!picked) return { hour: 0, minute: 0, second: 0 };
+    return { hour: Number(picked[1]), minute: Number(picked[2]), second: Number(picked[3] ?? 0) };
+  }
+
+  // подсветить выбранное; scroll — прокрутить столбцы так, чтобы выбранное было посередине
+  function markTime(scroll) {
+    const time = currentTime();
+    pop.querySelectorAll('.col').forEach(col => {
+      const value = time[col.dataset.unit];
+      col.querySelectorAll('button').forEach(b => b.classList.toggle('on', Number(b.dataset.value) === value));
+      if (scroll) {
+        const item = col.children[value];
+        col.scrollTop = item.offsetTop - col.offsetTop - (col.clientHeight - item.offsetHeight) / 2;
+      }
     });
   }
 
-  input.addEventListener('focus', () => { shown = null; draw(); pop.hidden = false; });
-  input.addEventListener('click', () => { if (pop.hidden) { shown = null; draw(); pop.hidden = false; } });
-  input.addEventListener('input', () => { shown = null; if (!pop.hidden) draw(); });
+  const open = () => { shown = null; pop.hidden = false; draw(); };   // сначала показать: прокрутка работает только у видимого
+  input.addEventListener('focus', open);
+  input.addEventListener('click', () => { if (pop.hidden) open(); });
+  input.addEventListener('input', () => {
+    shown = null;
+    if (pop.hidden) return;
+    if (input.dataset.pick === 'date') drawCalendar(); else markTime(true);
+  });
   input.addEventListener('blur', () => pop.hidden = true);
   input.addEventListener('keydown', e => { if (e.key === 'Escape') pop.hidden = true; });
 }
