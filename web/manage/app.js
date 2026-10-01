@@ -371,8 +371,8 @@ async function editView(id, g) {
 }
 
 function formView(p) {
-  // по умолчанию: начало через 5 минут по часам компьютера, до целой минуты вверх; конец — через минуту после начала
-  const start = p ? new Date(p.window_start) : new Date(Math.ceil((Date.now() + 5 * 60000) / 60000) * 60000);
+  // по умолчанию: начало через 10 минут, до целой минуты вверх; конец — через минуту после начала
+  const start = p ? new Date(p.window_start) : new Date(Math.ceil((Date.now() + 10 * 60000) / 60000) * 60000);
   const end = p ? new Date(p.window_end) : new Date(+start + 60000);
   main.innerHTML = `${p ? `<a class="mono small muted" href="#/p/${esc(p.id)}">← к опросу</a>` : ''}
   <div class="head"${p ? ' style="margin-top:32px"' : ''}><h1>${p ? 'Изменить опрос' : 'Новый опрос'}</h1></div>
@@ -510,6 +510,8 @@ function attachPicker(input) {
       const time = currentTime();
       time[b.parentElement.dataset.unit] = Number(b.dataset.value);
       input.value = `${pad(time.hour)}:${pad(time.minute)}:${pad(time.second)}`;
+      const caret = { hour: 2, minute: 5, second: 8 }[b.parentElement.dataset.unit];   // курсор — после изменённой части
+      input.setSelectionRange(caret, caret);
       markTime(false);
     });
     pop.querySelector('.now').onclick = () => { input.value = timeText(new Date()); markTime(true); };
